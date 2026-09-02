@@ -2,6 +2,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,18 @@ class Settings(BaseSettings):
     max_sampled_frames: int = 3000
 
     log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _normalize_log_level(cls, v: str) -> str:
+        """
+        LOG_LEVEL은 api·worker와 같은 .env를 공유한다. Node(pino)는 'debug' 같은
+        소문자를 쓰지만 Python logging은 대문자만 받으므로 여기서 맞춰준다.
+        """
+        level = v.strip().upper()
+        if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}:
+            return "INFO"
+        return level
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

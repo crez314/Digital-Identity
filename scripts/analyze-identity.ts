@@ -18,11 +18,11 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, extname, join, resolve } from 'node:path';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
-  computeSeverity, embeddingVariance, fuse, linearNormalizer, makeNormalizer,
+  computeSeverity, embeddingVariance, euclideanFromCosine, fuse, linearNormalizer, makeNormalizer,
   seriesStats, type DriftSummary, type FusionWeights, type SeriesStats,
   type SeverityThresholds, type SeverityWeights,
 } from '@crez/engine';
@@ -80,6 +80,66 @@ const DEFAULT_SCORING: ScoringConfig = {
   tailWeight: 0.30,
 };
 
+/**
+ * 판정 파라미터를 설정 파일에서 읽는다 (§11 — 코드에 weight를 박지 않는다).
+ * 명시 경로 > configs/scoring.yaml > 코드 기본값 순으로 적용한다.
+ */
+function loadScoring(explicit: string | null): ScoringConfig & { calibration?: unknown } {
+  const path = explicit ?? resolve('configs/scoring.yaml');
+  if (!existsSync(path)) {
+    console.warn(`      설정 파일 없음, 코드 기본값 사용: ${path}`);
+    return DEFAULT_SCORING;
+  }
+  const raw = readFileSync(path, 'utf8');
+  const parsed = (path.endsWith('.json') ? JSON.parse(raw) : parseYaml(raw)) as Partial<ScoringConfig>;
+  return {
+    ...DEFAULT_SCORING,
+    ...parsed,
+    weights: { ...DEFAULT_SCORING.weights, ...(parsed.weights ?? {}) },
+    severityWeights: { ...DEFAULT_SCORING.severityWeights, ...(parsed.severityWeights ?? {}) },
+    thresholds: { ...DEFAULT_SCORING.thresholds, ...(parsed.thresholds ?? {}) },
+    normalization: { ...DEFAULT_SCORING.normalization, ...(parsed.normalization ?? {}) },
+  };
+}
+
+/** 의존성 없이 이 설정 파일이 쓰는 범위(중첩 매핑·스칼라·주석)만 처리한다. */
+function parseYaml(text: string): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  const stack: Array<{ indent: number; node: Record<string, unknown> }> = [{ indent: -1, node: root }];
+
+  for (const line of text.split('\n')) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    const indent = line.length - line.trimStart().length;
+    const body = line.trim().replace(/\s+#.*$/, '');
+    const idx = body.indexOf(':');
+    if (idx === -1) continue;
+    const key = body.slice(0, idx).trim();
+    const rest = body.slice(idx + 1).trim();
+
+    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
+    const parent = stack[stack.length - 1].node;
+
+    if (rest === '') {
+      const child: Record<string, unknown> = {};
+      parent[key] = child;
+      stack.push({ indent, node: child });
+    } else {
+      parent[key] = coerce(rest);
+    }
+  }
+  return root;
+
+  function coerce(v: string): unknown {
+    const unquoted = v.replace(/^["']|["']$/g, '');
+    if (unquoted !== v) return unquoted;
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+    if (v === 'null') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && v !== '' ? n : v;
+  }
+}
+
 // ── ML 서비스 ────────────────────────────────────────────
 const ML = process.env.ML_BASE_URL ?? 'http://localhost:8000';
 const ML_TOKEN = process.env.ML_INTERNAL_TOKEN ?? 'dev-internal-token';
@@ -125,25 +185,59 @@ function referenceImages(dir: string): string[] {
     .sort();
 }
 
-// ── 메인 ─────────────────────────────────────────────────
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const scoring: ScoringConfig = args.config
-    ? { ...DEFAULT_SCORING, ...JSON.parse(readFileSync(args.config, 'utf8')) }
-    : DEFAULT_SCORING;
+// ── 분석 파이프라인 (§19) ────────────────────────────────
+//
+// CLI와 분리해 두어 API 계층에서 그대로 호출할 수 있다.
+//   analyzeIdentity({ reference, video, config }) → IdentityAnalysisResult
+// 산출물 파일 쓰기는 이 함수 밖의 책임이다.
 
-  mkdirSync(args.output, { recursive: true });
+export interface AnalyzeInput {
+  /** 기준 이미지 디렉터리 또는 파일 */
+  reference: string;
+  video: string;
+  scoring?: ScoringConfig;
+  samplingFps?: number;
+  /** Identity 식별자. multi-person 확장 시 인물별로 하나씩 */
+  referenceId?: string;
+  personId?: string;
+}
+
+export type IdentityAnalysisResult = Awaited<ReturnType<typeof analyzeIdentity>>;
+
+export async function analyzeIdentity(input: AnalyzeInput) {
+  const scoring = input.scoring ?? loadScoring(null);
+  const samplingFps = input.samplingFps ?? 2;
+  const referenceId = input.referenceId ?? 'reference_person';
   const runId = randomUUID().slice(0, 8);
-  const prefix = `poc/${runId}`;
+  return runPipeline({
+    reference: resolve(input.reference),
+    video: resolve(input.video),
+    samplingFps, referenceId,
+    personId: input.personId ?? referenceId,
+    scoring, runId,
+    log: () => undefined,
+  });
+}
 
-  console.log(`CREZ Identity Consistency 분석  [run ${runId}]`);
-  console.log(`  기준: ${args.reference}`);
-  console.log(`  영상: ${args.video}\n`);
+// ── 파이프라인 본체 ──────────────────────────────────────
+interface PipelineArgs {
+  reference: string;
+  video: string;
+  samplingFps: number;
+  referenceId: string;
+  personId: string;
+  scoring: ScoringConfig;
+  runId: string;
+  log: (msg: string) => void;
+}
+
+async function runPipeline(a: PipelineArgs) {
+  const prefix = `poc/${a.runId}`;
 
   // 1) 기준 이미지 업로드 및 임베딩 (§4 Reference Identity)
-  const images = referenceImages(args.reference);
-  if (images.length === 0) throw new Error(`기준 이미지를 찾을 수 없습니다: ${args.reference}`);
-  console.log(`[1/5] 기준 이미지 ${images.length}장 인코딩`);
+  const images = referenceImages(a.reference);
+  if (images.length === 0) throw new Error(`기준 이미지를 찾을 수 없습니다: ${a.reference}`);
+  a.log(`[1/4] 기준 이미지 ${images.length}장 인코딩`);
 
   const imageKeys: string[] = [];
   for (const img of images) {
@@ -159,25 +253,21 @@ async function main() {
   if (usable.length === 0) {
     throw new Error(`기준 이미지에서 얼굴을 찾지 못했습니다: ${faceRes.results.map((r) => r.error).join(', ')}`);
   }
-  console.log(`      얼굴 검출 ${usable.length}/${images.length}장`);
+  a.log(`      얼굴 검출 ${usable.length}/${images.length}장`);
 
-  // 2) 대표 Identity Vector 생성 — 단순 평균이 아니라 이상치 제거 + 품질 가중
+  // 2) 대표 Identity Vector — 단순 평균이 아니라 이상치 제거 + 품질 가중
   const agg = await ml<{ centroid: number[]; variance: number; outlierIds: string[]; usedIds: string[] }>(
     '/v1/profile/aggregate',
-    {
-      vectors: usable.map((r) => ({ id: r.imageKey, vector: r.vector, quality: r.quality })),
-      outlierSigma: 3.0,
-    },
+    { vectors: usable.map((r) => ({ id: r.imageKey, vector: r.vector, quality: r.quality })), outlierSigma: 3.0 },
   );
 
-  // 신체 기준도 같은 이미지에서 만든다. 얼굴과 독립적인 신호이므로 별도 집계한다.
-  // 신체 인코더가 없거나 유효한 crop이 없으면 신체 지표 없이 진행한다.
+  // 신체 기준도 같은 방식으로 유도한 crop에서 만든다 — 구도가 다르면 비교가 성립하지 않는다
   let bodyCentroid: number[] | null = null;
   let bodyVariance: number | null = null;
   try {
-    const bodyRes = await ml<{
-      results: Array<{ imageKey: string; ok: boolean; vector: number[] | null; quality: number | null }>;
-    }>('/v1/embed/body', { imageKeys });
+    const bodyRes = await ml<{ results: Array<{ imageKey: string; ok: boolean; vector: number[] | null; quality: number | null }> }>(
+      '/v1/embed/body', { imageKeys },
+    );
     const bodyUsable = bodyRes.results.filter((r) => r.ok && r.vector);
     if (bodyUsable.length > 0) {
       const bodyAgg = await ml<{ centroid: number[]; variance: number }>('/v1/profile/aggregate', {
@@ -188,17 +278,14 @@ async function main() {
       bodyVariance = bodyAgg.variance;
     }
   } catch (e) {
-    console.warn(`      신체 기준 생성 실패(얼굴만 진행): ${String(e).slice(0, 100)}`);
+    a.log(`      신체 기준 생성 실패(얼굴만 진행): ${String(e).slice(0, 100)}`);
   }
+  a.log(`[2/4] 대표 벡터 — 얼굴 산포 ${agg.variance.toFixed(5)}, 이상치 ${agg.outlierIds.length}장 제외`
+    + (bodyCentroid ? ` / 신체 산포 ${(bodyVariance ?? 0).toFixed(5)}` : ' / 신체 기준 없음'));
 
-  console.log(
-    `[2/5] 대표 벡터 생성 — 얼굴 산포 ${agg.variance.toFixed(5)}, 이상치 ${agg.outlierIds.length}장 제외`
-    + (bodyCentroid ? ` / 신체 산포 ${(bodyVariance ?? 0).toFixed(5)}` : ' / 신체 기준 없음'),
-  );
-
-  // 3) 영상 분석 (§7 프레임 단위 원시 시계열)
-  console.log(`[3/5] 영상 분석 (${args.samplingFps} fps 샘플링)`);
-  const videoKey = await upload(args.video, `${prefix}/${basename(args.video)}`, 'video/mp4');
+  // 3) 영상 분석
+  a.log(`[3/4] 영상 분석 (${a.samplingFps} fps 샘플링)`);
+  const videoKey = await upload(a.video, `${prefix}/${basename(a.video)}`, 'video/mp4');
 
   const qc = await ml<{
     videoKey: string; durationMs: number;
@@ -216,43 +303,33 @@ async function main() {
     }>;
   }>('/v1/qc/score', {
     videoKey,
-    references: [{
-      identityId: args.label,
-      faceCentroid: agg.centroid,
-      ...(bodyCentroid ? { bodyCentroid } : {}),
-    }],
-    sampleFps: args.samplingFps,
+    references: [{ identityId: a.referenceId, faceCentroid: agg.centroid, ...(bodyCentroid ? { bodyCentroid } : {}) }],
+    sampleFps: a.samplingFps,
   });
 
   const m = qc.perIdentity[0];
-  console.log(`      ${m.series.length}개 프레임 분석`);
+  a.log(`      ${m.series.length}개 프레임 분석`);
 
-  // 4) CREZ 판정 계층 (@crez/engine — 자체 구현)
-  console.log('[4/5] 신원 일관성 판정');
-
+  // 4) CREZ 판정 계층 (@crez/engine)
+  a.log('[4/4] 신원 일관성 판정');
   const faceValues = m.series.filter((p) => p.similarity > 0).map((p) => p.similarity);
   const bodyValues = m.series.filter((p) => p.bodySimilarity !== null).map((p) => p.bodySimilarity as number);
   const faceStats = seriesStats(faceValues);
   const bodyStats: SeriesStats | null = bodyValues.length > 0 ? seriesStats(bodyValues) : null;
 
-  const frameSec = 1 / Math.max(args.samplingFps, 0.1);
+  const frameSec = 1 / Math.max(a.samplingFps, 0.1);
   let runLength = 0;
   const frames = m.series.map((p, i) => {
     const sig = {
-      faceSimilarity: p.similarity,
-      bodySimilarity: p.bodySimilarity,
-      faceDelta: p.embeddingDelta,
-      bodyDelta: p.bodyDelta,
-      durationSec: 0,
+      faceSimilarity: p.similarity, bodySimilarity: p.bodySimilarity,
+      faceDelta: p.embeddingDelta, bodyDelta: p.bodyDelta, durationSec: 0,
     };
-    // 조건이 연속으로 유지된 길이를 severity에 반영한다
-    const provisional = computeSeverity(sig, scoring.thresholds, scoring.severityWeights);
+    const provisional = computeSeverity(sig, a.scoring.thresholds, a.scoring.severityWeights);
     runLength = provisional.reasons.length > 0 ? runLength + 1 : 0;
     const sev = computeSeverity(
-      { ...sig, durationSec: runLength * frameSec },
-      scoring.thresholds, scoring.severityWeights,
+      { ...sig, durationSec: runLength * frameSec }, a.scoring.thresholds, a.scoring.severityWeights,
     );
-    const isDrift = sev.reasons.length > 0 && runLength >= scoring.thresholds.driftMinDurationFrames;
+    const isDrift = sev.reasons.length > 0 && runLength >= a.scoring.thresholds.driftMinDurationFrames;
     return { index: i, point: p, severity: sev, isDrift, runLength };
   });
 
@@ -265,38 +342,37 @@ async function main() {
     driftFrames: driftFrames.length,
     totalFrames: frames.length,
     maxSeverity: severities.length ? Math.max(...severities) : 0,
-    averageSeverity: severities.length ? severities.reduce((a, b) => a + b, 0) / severities.length : 0,
+    averageSeverity: severities.length ? severities.reduce((x, y) => x + y, 0) / severities.length : 0,
     maxDurationSec: maxRun * frameSec,
   };
 
   const breakdown = fuse(
-    {
-      faceStats, bodyStats,
-      temporalFace: m.temporalConsistency,
-      temporalBody: m.temporalBodyConsistency,
-      drift,
-    },
-    scoring.weights,
-    makeNormalizer(scoring.normalization.face),
-    makeNormalizer(scoring.normalization.body),
-    { tailWeight: scoring.tailWeight },
+    { faceStats, bodyStats, temporalFace: m.temporalConsistency, temporalBody: m.temporalBodyConsistency, drift },
+    a.scoring.weights,
+    makeNormalizer(a.scoring.normalization.face),
+    makeNormalizer(a.scoring.normalization.body),
+    { tailWeight: a.scoring.tailWeight },
   );
 
-  // 5) 산출물
-  console.log('[5/5] 산출물 생성');
-  const normFace = linearNormalizer(scoring.normalization.face);
-  const normBody = linearNormalizer(scoring.normalization.body);
+  const normFace = linearNormalizer(a.scoring.normalization.face);
+  const normBody = linearNormalizer(a.scoring.normalization.body);
+
+  // §13 — 다중 인물 확장을 위해 person_id / track_id / reference_id를 함께 남긴다.
+  // 현재는 1인이지만 스키마는 인물별 배열을 담을 수 있는 형태를 유지한다.
+  const trackIds = [...new Set(m.series.map((p) => p.trackIndex).filter((t): t is number => t !== null))];
 
   const report = {
-    reference_id: args.label,
-    run_id: runId,
+    reference_id: a.referenceId,
+    person_id: a.personId,
+    track_ids: trackIds,
+    run_id: a.runId,
     generated_at: new Date().toISOString(),
     video: {
-      filename: basename(args.video),
+      filename: basename(a.video),
       duration: Number((qc.durationMs / 1000).toFixed(2)),
-      sampling_fps: args.samplingFps,
+      sampling_fps: a.samplingFps,
       analyzed_frames: frames.length,
-      sha256: createHash('sha256').update(readFileSync(args.video)).digest('hex').slice(0, 16),
+      sha256: createHash('sha256').update(readFileSync(a.video)).digest('hex').slice(0, 16),
     },
     reference: {
       images: images.length,
@@ -325,10 +401,14 @@ async function main() {
           p10_similarity: normBody(bodyStats.p10),
           median_similarity: normBody(bodyStats.median),
           std_dev: bodyStats.stdDev,
-          temporal_consistency: m.temporalBodyConsistency === null
-            ? null : Number((m.temporalBodyConsistency * 100).toFixed(1)),
+          temporal_consistency: m.temporalBodyConsistency === null ? null : Number((m.temporalBodyConsistency * 100).toFixed(1)),
           embedding_variance: embeddingVariance(m.series.map((p) => p.bodyDelta)),
           raw_cosine: { mean: bodyStats.mean, min: bodyStats.min, p05: bodyStats.p05 },
+          // §6 — 코사인과 유클리드를 함께 기록한다. 정규화 벡터에서 서로 대응한다.
+          raw_euclidean: {
+            mean: Number(euclideanFromCosine(bodyStats.mean).toFixed(4)),
+            max: Number(euclideanFromCosine(bodyStats.min).toFixed(4)),
+          },
         }
       : null,
     binding_stability: Number((m.bindingStability * 100).toFixed(1)),
@@ -344,35 +424,52 @@ async function main() {
     crez_identity_score: breakdown.finalScore,
     provenance: {
       encoders: qc.modelBundle,
-      scoring_config: scoring,
+      scoring_config: a.scoring,
       note: '외부 모델은 특징 추출만 담당한다. 판정·융합은 @crez/engine 자체 구현.',
     },
   };
+
+  return { report, frames, breakdown, drift, faceStats, bodyStats };
+}
+
+// ── 메인 ─────────────────────────────────────────────────
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const scoring = loadScoring(args.config);
+  mkdirSync(args.output, { recursive: true });
+  const runId = randomUUID().slice(0, 8);
+
+  console.log(`CREZ Identity Consistency 분석  [run ${runId}]`);
+  console.log(`  기준: ${args.reference}`);
+  console.log(`  영상: ${args.video}\n`);
+
+  const { report, frames, breakdown, drift, faceStats, bodyStats } = await runPipeline({
+    reference: args.reference, video: args.video, samplingFps: args.samplingFps,
+    referenceId: args.label, personId: args.label, scoring, runId,
+    log: (m) => console.log(m),
+  });
 
   const reportPath = join(args.output, 'identity_report.json');
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
   const csvPath = join(args.output, 'frame_metrics.csv');
-  const header = 'frame,timestamp_sec,face_similarity,body_similarity,face_temporal_delta,body_temporal_delta,frame_quality,occlusion,drift,drift_severity,drift_reasons';
+  const header = 'frame,timestamp_sec,person_id,track_id,face_similarity,body_similarity,face_temporal_delta,body_temporal_delta,frame_quality,occlusion,drift,drift_severity,drift_reasons';
   const rows = frames.map((f) => {
     const p = f.point;
     return [
-      f.index,
-      (p.ms / 1000).toFixed(3),
+      f.index, (p.ms / 1000).toFixed(3), args.label,
+      p.trackIndex === null ? '' : p.trackIndex,
       p.similarity.toFixed(6),
       p.bodySimilarity === null ? '' : p.bodySimilarity.toFixed(6),
       p.embeddingDelta === null ? '' : p.embeddingDelta.toFixed(6),
       p.bodyDelta === null ? '' : p.bodyDelta.toFixed(6),
-      p.frameQuality.toFixed(4),
-      p.occlusion.toFixed(4),
-      f.isDrift ? 'true' : 'false',
-      f.severity.severity.toFixed(4),
+      p.frameQuality.toFixed(4), p.occlusion.toFixed(4),
+      f.isDrift ? 'true' : 'false', f.severity.severity.toFixed(4),
       `"${f.severity.reasons.join('|')}"`,
     ].join(',');
   });
   writeFileSync(csvPath, `${[header, ...rows].join('\n')}\n`);
 
-  // 그래프 — CSV에서 렌더한다 (matplotlib)
   const graphPath = join(args.output, 'similarity_graph.png');
   try {
     execFileSync(
@@ -384,7 +481,6 @@ async function main() {
     console.warn(`      그래프 생성 실패(무시): ${String(e).slice(0, 120)}`);
   }
 
-  // ── 요약 출력 ──────────────────────────────────────────
   console.log('\n────────────────────────────────────────');
   console.log(`  CREZ Identity Score   ${breakdown.finalScore.toFixed(1)} / 100`);
   console.log('────────────────────────────────────────');

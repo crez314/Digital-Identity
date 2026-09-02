@@ -1,0 +1,71 @@
+# CREZ Identity Score 판정 파라미터.
+#
+# 코드에 가중치·임계값을 두지 않는다. 값이 바뀌어도 재배포 없이 반영되고,
+# 어떤 값으로 판정했는지가 산출물에 기록되어 과거 결과를 재현할 수 있다.
+
+# ── 복합 점수 가중치 (§11) ───────────────────────────────
+weights:
+  faceIdentity: 0.40
+  bodyIdentity: 0.25
+  temporalFace: 0.15
+  temporalBody: 0.10
+  driftPenalty: 0.10        # 가중합이 아니라 감점으로 작동한다
+
+# ── Drift Severity 신호별 가중치 (§9) ────────────────────
+severityWeights:
+  faceDrop: 0.35
+  bodyDrop: 0.20
+  faceInstability: 0.20
+  bodyInstability: 0.10
+  duration: 0.15
+
+# ── 임계값 (§8) ──────────────────────────────────────────
+#
+# faceSimilarityThreshold는 임의로 정하지 않는다. 동일인 분포의 하위 꼬리에서
+# 잡아야 하며, 그보다 높게 두면 정상 프레임이 드리프트로 오판된다.
+#
+# 근거: outputs/discrimination_report.json (2026-09-02 측정)
+#   동일인 쌍 78건  평균 0.7954  범위 0.6361~0.9865  p05 0.6822
+#   타인   쌍 13건  평균 0.1434  범위 0.0752~0.2228
+#   두 분포는 겹치지 않으며 분리 마진은 0.652.
+#
+# 이전 값 0.70은 동일인 분포 안쪽(p05=0.6822보다 위)에 있어 정상 변동을
+# 드리프트로 잡았다. 관측된 동일인 최솟값 0.6361을 기준으로 0.64로 낮춘다.
+#
+# 주의: 표본이 작다(인물 2명, 동일인 벡터 13개). §19 Phase 2의 검증셋
+# (영상 50편 이상)이 확보되면 재보정해야 한다. 현재 값은 예비 보정이다.
+thresholds:
+  faceSimilarityThreshold: 0.64
+  bodySimilarityThreshold: 0.65     # 신체는 아직 분포 미측정 — 잠정값
+  faceTemporalDeltaThreshold: 0.18
+  bodyTemporalDeltaThreshold: 0.20
+  durationSaturationSec: 2.0
+  driftMinDurationFrames: 3
+
+# ── 0~100 정규화 (§5) ────────────────────────────────────
+#
+# floor는 타인 쌍의 상한(0.2228) 근처, ceiling은 동일인 쌍의 상위 구간에 둔다.
+# 그래야 "타인 수준"이 0점, "동일인 최상"이 100점에 대응한다.
+normalization:
+  face:
+    floor: 0.23
+    ceiling: 0.95
+    curve: linear         # 검증셋 확보 후 calibrated로 교체
+  body:
+    floor: 0.20
+    ceiling: 0.95
+    curve: linear
+
+# 대표 일치도에서 하위 백분위(p05)를 섞는 비율.
+# 0이면 평균만, 1이면 p05만 본다.
+tailWeight: 0.30
+
+# 측정 근거 메타데이터 — 산출물에 그대로 실린다
+calibration:
+  source: outputs/discrimination_report.json
+  measured_at: "2026-09-02"
+  identities: 2
+  same_person_pairs: 78
+  different_person_pairs: 13
+  separation_margin: 0.652
+  status: preliminary       # 검증셋 확보 전 예비 보정

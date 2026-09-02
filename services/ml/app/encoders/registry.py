@@ -24,7 +24,8 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "encoders.yam
 def load_config() -> dict:
     path = Path(os.environ.get("CREZ_ENCODER_CONFIG", str(DEFAULT_CONFIG)))
     if not path.exists():
-        raise FileNotFoundError(f"인코더 설정을 찾을 수 없습니다: {path}")
+        # 호출자가 '인코더를 쓸 수 없다'로 일관되게 처리할 수 있게 한다
+        raise EncoderUnavailable(f"인코더 설정을 찾을 수 없습니다: {path}")
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 

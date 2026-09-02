@@ -6,3 +6,4 @@ export * from './stats';
 export * from './normalize';
 export * from './severity';
 export * from './fusion';
+export * from './distance';

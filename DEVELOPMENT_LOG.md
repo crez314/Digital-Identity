@@ -99,20 +99,62 @@ final = clamp(base - pen, 0, 100)
    유도한 신체 영역을 인코딩해 신체 유사도가 0.38로 나왔다. 기준도 동일하게
    유도하도록 통일하니 0.70으로 정정됐다. 구도 차이가 신원 차이로 둔갑한 사례다.
 
-4. **백분위 경계 성질.** 붕괴 프레임 비율이 백분위와 정확히 같으면 보간이 좋은 값
+4. **임계값이 동일인 분포 안쪽에 있었다.** `faceSimilarityThreshold: 0.70`이
+   근거 없이 정해져 정상 프레임을 드리프트로 오판했다. 변별력 측정으로 발견해
+   0.64로 재보정했다(위 절 참조).
+
+5. **백분위 경계 성질.** 붕괴 프레임 비율이 백분위와 정확히 같으면 보간이 좋은 값
    쪽으로 당겨 그 백분위는 붕괴를 놓친다(5% 붕괴 → p05 무력, 10% → p10 무력).
    임계 판정에 단일 백분위를 쓰지 않고 min을 함께 본다. 테스트로 고정했다.
 
+### 변별력 측정 (2026-09-02 추가)
+
+점수의 의미를 확정하기 위해 동일인/타인 분포를 측정했다. 이것 없이는
+"71.3점"이 신원 유지를 뜻하는지 판단할 근거가 없다.
+
+측정 대상 — 합성 인물 2명(같은 인구통계로 난이도를 높였다),
+인물 A는 정지 이미지 1장 + 생성 영상 프레임 12장.
+
+| 구분 | 쌍 수 | 평균 | 범위 |
+| --- | --- | --- | --- |
+| 동일인 | 78 | 0.7954 | 0.6361 ~ 0.9865 |
+| 타인 | 13 | 0.1434 | 0.0752 ~ 0.2228 |
+
+분리 마진 **0.652**, 두 분포는 겹치지 않는다. 최적 임계값 0.6361에서
+정확도 1.0 (FAR 0, FRR 0).
+
+**이 측정으로 임계값 오류를 발견했다.** 기존 `faceSimilarityThreshold: 0.70`은
+동일인 분포 안쪽(p05 = 0.6822)에 있어 정상 프레임을 드리프트로 오판했다.
+0.64로 낮추자 검출된 드리프트가 **3프레임 → 0프레임**이 되었다. 그 3프레임은
+오탐이었다.
+
+임계값은 이제 `configs/scoring.yaml`에서 관리하며, 측정 근거(`calibration`)가
+산출물의 `provenance`에 함께 실린다.
+
+한계 — 표본이 작다(인물 2명, 동일인 벡터 13개). §19 Phase 2의 검증셋
+(영상 50편 이상)이 확보되면 재보정해야 한다. 현재 값은 `status: preliminary`다.
+
+측정 재현: `python services/ml/scripts/measure_discrimination.py <manifest> <out>`
+
 ### 테스트
 
-engine 49건 (신규 21건) · providers 20건 · api 8건 · worker 5건 · contracts 3건 · shared 11건
-Python 25건. 전체 통과.
+TypeScript 100건 (engine 53 · providers 20 · shared 11 · api 8 · worker 5 · contracts 3)
+Python 34건. 전체 통과.
 
-§22 요구 테스트 대응:
-- 같은 이미지 비교 → face 1.0000 / body 1.0000
-- 같은 사람 다른 의상 → face 1.0000 유지, body 0.7879 하락
-- 연속 동일 프레임 → temporal delta 0.000000
-- 백분위·severity·fusion 경계 조건 → `poc-modules.test.ts`
+§22 요구 테스트 5종 — `services/ml/tests/test_encoders.py`에 자동 테스트로 커밋.
+실제 가중치로 실추론하며, 가중치가 없는 환경에서는 skip한다(9건 skip 확인).
+
+| 요구 | 테스트 | 결과 |
+| --- | --- | --- |
+| 같은 이미지 → 높은 유사도 | `test_same_image_gives_maximum_similarity` | 1.0000 |
+| **다른 사람 → 낮은 유사도** | `test_different_person_gives_low_similarity` | 타인 상한 0.2228 |
+| 같은 사람 다른 의상 → body 변화 | `test_clothing_change_moves_body_but_not_face` | face 유지 / body 하락 |
+| 연속 동일 프레임 → delta ≈ 0 | `test_identical_consecutive_frames_have_zero_delta` | 0.000000 |
+| 다른 identity 삽입 → drift | `test_identity_switch_produces_large_delta` | 전환 delta > 정상 × 3 |
+
+**정정** — 이전 기록에서 이 5종을 "대응"이라고 적었으나, 당시에는 셸에서
+일회성으로 실행했을 뿐 자동 테스트로 커밋하지 않은 상태였다. 회귀를 막지
+못했으므로 정확한 서술이 아니었다. 이번에 실제 테스트로 커밋했다.
 
 ### 커밋
 

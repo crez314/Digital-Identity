@@ -3,6 +3,7 @@ import { embeddingVariance, percentile, seriesStats } from '../stats';
 import { calibratedNormalizer, linearNormalizer, makeNormalizer } from '../normalize';
 import { computeSeverity, labelFor, type SeverityThresholds, type SeverityWeights } from '../severity';
 import { fuse, representativeIdentity, type FusionWeights } from '../fusion';
+import { compare, cosineSimilarity, euclideanDistance, euclideanFromCosine } from '../distance';
 
 /**
  * CREZ 자체 판정 계층 검증.
@@ -237,5 +238,30 @@ describe('복합 점수 융합 (§11)', () => {
     const mixed = representativeIdentity(s, 0.3);
     expect(mixed).toBeLessThan(s.mean);
     expect(mixed).toBeGreaterThan(s.p05);
+  });
+});
+
+describe('거리 지표 (§6)', () => {
+  it('정규화 벡터에서 유클리드 거리와 코사인은 대응한다', () => {
+    const a = [0.6, 0.8, 0, 0];
+    const b = [0.8, 0.6, 0, 0];
+    const cos = cosineSimilarity(a, b);
+    expect(euclideanDistance(a, b)).toBeCloseTo(euclideanFromCosine(cos), 5);
+  });
+
+  it('동일 벡터는 거리 0, 유사도 1', () => {
+    const v = [0.5, 0.5, 0.5, 0.5];
+    const d = compare(v, v);
+    expect(d.cosine).toBeCloseTo(1, 6);
+    expect(d.euclidean).toBeCloseTo(0, 6);
+  });
+
+  it('직교 벡터는 유사도 0', () => {
+    expect(cosineSimilarity([1, 0], [0, 1])).toBeCloseTo(0, 6);
+  });
+
+  it('길이가 다르면 안전하게 처리한다', () => {
+    expect(cosineSimilarity([1, 2], [1, 2, 3])).toBe(0);
+    expect(euclideanDistance([1, 2], [1, 2, 3])).toBe(Number.POSITIVE_INFINITY);
   });
 });

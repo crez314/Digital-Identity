@@ -1,0 +1,56 @@
+{
+  "encoder": {
+    "name": "sface",
+    "version": "2021dec",
+    "dim": 512,
+    "track": "production",
+    "weightsSource": "https://github.com/opencv/opencv_zoo (face_recognition_sface)",
+    "weightsLicense": "Apache-2.0"
+  },
+  "identities": {
+    "A_CRZ-H001": 13,
+    "C_other_kpop": 1
+  },
+  "same_person": {
+    "count": 78,
+    "mean": 0.7954,
+    "std": 0.0947,
+    "min": 0.6361,
+    "max": 0.9865,
+    "p05": 0.6822,
+    "p95": 0.9791
+  },
+  "different_person": {
+    "count": 13,
+    "mean": 0.1434,
+    "std": 0.0428,
+    "min": 0.0752,
+    "max": 0.2228,
+    "p05": 0.082,
+    "p95": 0.2006
+  },
+  "separation": {
+    "margin": 0.652,
+    "min_same_vs_max_diff": 0.0,
+    "overlapping": false
+  },
+  "optimal_threshold": {
+    "threshold": 0.6361,
+    "accuracy": 1.0,
+    "far": 0.0,
+    "frr": 0.0
+  },
+  "pairwise": [
+    {
+      "pair": "A_CRZ-H001 vs C_other_kpop",
+      "count": 13,
+      "mean": 0.1434,
+      "std": 0.0428,
+      "min": 0.0752,
+      "max": 0.2228,
+      "p05": 0.082,
+      "p95": 0.2006
+    }
+  ],
+  "note": "동일인 쌍은 같은 인물의 서로 다른 이미지·프레임으로 구성했다. 동일 이미지 비교(항상 1.0)는 변별력을 말해주지 않으므로 제외했다."
+}

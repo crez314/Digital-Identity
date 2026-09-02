@@ -6,6 +6,9 @@
 **특허 가칭** 디지털 신원 라이브러리 기반의 다중 인물 신원 일관성 유지 및 영상 콘텐츠 생성
 시스템 및 방법
 
+> **구현 상태 표기** (기술명세서 v1.2와 동기화, 2026-09-02)
+> **[구현됨]** 코드·테스트로 확인 · **[부분]** 일부만 동작 · **[계획]** 미구현
+
 ## 매핑표
 
 | 청구 요소 (초안 §42) | 구현 모듈 | 소스 위치 | 산출 데이터 |
@@ -17,6 +20,27 @@
 | 신원 일관성 정보 산출 | QC 규칙 엔진 (ruleset 기반 가중합) | `packages/engine/src/scoring.ts` | `qc_run.overall_score`, `qc_run.ruleset_version` |
 | 기준 미달 인물·시간구간 검출 | Error Detection (§10.2) | `packages/engine/src/rules.ts` | `qc_finding` (인물 + 시각 + 유형 + 근거) |
 | 생성 조건 변경 후 일부 재생성 | Regeneration Engine (§11) | `packages/engine/src/regeneration.ts`, `apps/worker/src/processors/regeneration.ts` | `regeneration_task.strategy`, 후속 `generation_job` |
+
+**[부분]** 세그먼트 단위 선택적 재생성은 성립하나 **인물 단위는 미구현**이다.
+`targetIdentityIds`가 전략에 담기지만 생성 요청 조립부가 소비하지 않는다.
+청구 요소 중 "기준 미달 **인물**에 대한 조건 변경"에 해당하므로 우선 보완 대상이다.
+
+### 실측 근거 (2026-09-02)
+
+특허 실시예로 쓸 수 있는 실제 측정 결과다.
+
+| 항목 | 값 |
+| --- | --- |
+| 변별력 — 동일인 쌍 78건 | 평균 0.7954, 범위 0.6361~0.9865 |
+| 변별력 — 타인 쌍 13건 | 평균 0.1434, 범위 0.0752~0.2228 |
+| 분리 마진 | 0.652 (겹침 없음) |
+| 실제 생성 영상 분석 | face 0.7810 / body 0.6996 / temporal_face 0.5761 / temporal_body 0.9801 |
+| CREZ Identity Score | 71.3 / 100 |
+
+산출물: `outputs/discrimination_report.json`, `outputs/identity_report.json`,
+`outputs/frame_metrics.csv`, `outputs/similarity_graph.png`
+
+측정 방법과 수식 변경 이력은 `DEVELOPMENT_LOG.md` 참조.
 
 ## 모델 비종속성
 

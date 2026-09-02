@@ -25,7 +25,12 @@ export const SegmentStatus = z.enum([
 ]);
 export const MappingMethod = z.enum(['AUTO', 'MANUAL', 'CORRECTED']);
 export const ModelProvider = z.enum(['EXTERNAL_API', 'SELF_HOSTED']);
-export const GenerationMode = z.enum(['i2v', 'v2v', 'pose-guided', 't2v']);
+/**
+ * 생성 모드.
+ * 'reference' = 레퍼런스 이미지로 인물 신원을 조건화하는 방식(Higgsfield veo3.1 reference-to-video 등).
+ * CREZ의 Identity conditioning에 가장 가까운 실제 상용 경로다.
+ */
+export const GenerationMode = z.enum(['i2v', 'v2v', 'pose-guided', 't2v', 'reference']);
 export const JobStatus = z.enum(['QUEUED', 'SUBMITTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED']);
 
 export const QcStatus = z.enum(['RUNNING', 'PASSED', 'FAILED', 'ERROR']);

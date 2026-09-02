@@ -107,6 +107,40 @@ cd services/ml && pytest # ML 서비스 테스트 (mock 모드)
 WORKER_QUEUES=analysis,qc pnpm --filter @crez/worker dev
 ```
 
+## 생성 모델 연동
+
+기본은 `mock`(FFmpeg 컬러바)이며 실제 생성에는 Higgsfield를 연동한다.
+
+```bash
+# .env
+HIGGSFIELD_KEY_ID=...
+HIGGSFIELD_KEY_SECRET=...
+
+# 모델 활성화 (시드는 안전을 위해 DISABLED로 등록한다)
+curl -X PATCH -H "x-dev-user: admin@hicrez.com" -H "content-type: application/json" \
+  -d '{"status":"ACTIVE"}' \
+  http://localhost:3001/api/v1/models/higgsfield-veo31-reference/status
+```
+
+| 모델 code | 엔드포인트 | 모드 | 비고 |
+| --- | --- | --- | --- |
+| `higgsfield-veo31-reference` | `/veo3.1/reference-to-video` | `reference` | 레퍼런스 1~3장으로 신원 조건화 |
+| `higgsfield-veo31-i2v` | `/veo3.1/image-to-video` | `i2v` | 시작 프레임 1장 |
+| `higgsfield-kling25-pro-i2v` | `/kling-video/v2.5-turbo/pro/image-to-video` | `i2v` | 5·10초 |
+| `higgsfield-sora2-i2v` | `/sora-2/image-to-video` | `i2v` | 최대 12초 |
+
+연동 시 주의할 제약이 셋 있다.
+
+- **pose-guided 모드가 없다.** Higgsfield는 안무 궤적을 직접 조건화하는 엔드포인트를
+  제공하지 않으므로, 프로젝트 `config.requiredMode`를 `reference` 또는 `i2v`로 두어야 한다.
+- **길이가 고정 enum이다.** veo3.1은 4·6·8초만 받는다. 세그먼트 길이는 가장 가까운 값으로
+  스냅되며 그 사실이 경고 로그로 남는다.
+- **레퍼런스는 공개 URL이어야 한다.** 워커가 제출 직전에 presigned URL을 만들어 넘긴다.
+  로컬 MinIO 주소는 외부에서 접근할 수 없으므로 실연동 테스트는 공개 가능한 스토리지가 필요하다.
+
+자격증명이 없으면 어댑터는 **명시적으로 실패한다.** mock으로 조용히 대체되지 않는다 —
+"생성된 줄 알았는데 mock이었다"를 막기 위한 의도적 설계다.
+
 ## 라이선스 정책
 
 **상업 이용이 명시적으로 허용된 퍼미시브 라이선스 모델만 사용한다**(§7.1).

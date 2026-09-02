@@ -38,6 +38,12 @@ export interface ReferenceAsset {
   identityId: string;
   assetId: string;
   storageKey: string;
+  /**
+   * 외부 제공자가 내려받을 수 있는 presigned URL.
+   * 상용 API 대부분이 공개 URL만 받으므로 워커가 제출 직전에 채운다.
+   * 버킷은 비공개를 유지하고 만료 시간이 붙은 URL만 밖으로 나간다(§15).
+   */
+  signedUrl: string | null;
   captureSlot: string | null;
   expression: string | null;
   quality: number | null;

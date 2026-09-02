@@ -13,6 +13,7 @@ import { emit } from '../lib/events';
 import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
 import { materializeOutput } from '../lib/materialize';
+import { presignedGet } from '../lib/media-io';
 
 /**
  * generation 큐 (§8, §12).
@@ -56,14 +57,19 @@ async function pickReferences(
       return Number(b.qualityScore ?? 0) - Number(a.qualityScore ?? 0);
     });
 
-  return ranked.slice(0, 8).map((a) => ({
-    identityId,
-    assetId: a.id,
-    storageKey: a.storageKey,
-    captureSlot: a.captureSlot,
-    expression: a.expression,
-    quality: a.qualityScore ? Number(a.qualityScore) : null,
-  }));
+  // 외부 제공자는 공개 URL만 받으므로 제출 직전에 presigned GET URL을 만든다.
+  // 버킷은 비공개를 유지하고, 만료 시간이 붙은 URL만 밖으로 나간다(§15).
+  return Promise.all(
+    ranked.slice(0, 8).map(async (a) => ({
+      identityId,
+      assetId: a.id,
+      storageKey: a.storageKey,
+      signedUrl: await presignedGet(a.storageKey).catch(() => null),
+      captureSlot: a.captureSlot,
+      expression: a.expression,
+      quality: a.qualityScore ? Number(a.qualityScore) : null,
+    })),
+  );
 }
 
 async function loadModels(): Promise<ModelDescriptor[]> {
@@ -309,12 +315,45 @@ async function poll(data: GenerationPollJob & { projectId: string; segmentId: st
   return { state: 'SUCCEEDED', outputId: output.id };
 }
 
-/** fetchResult에 필요한 최소 요청 정보를 job 레코드에서 복원한다 */
+/**
+ * fetchResult에 필요한 요청 정보를 job 레코드에서 복원한다.
+ * 캐스트와 레퍼런스도 함께 복원한다 — 제공자에 따라 결과 조회 시점에 필요하고,
+ * 비어 있으면 실제 API 연동에서 조용히 깨진다.
+ */
 async function rebuildRequest(generationJobId: string): Promise<GenerationRequest> {
   const j = await prisma.generationJob.findUniqueOrThrow({
-    where: { id: generationJobId }, include: { segment: true },
+    where: { id: generationJobId },
+    include: { segment: { include: { project: { include: { cast: true } } } } },
   });
   const params = j.params as Record<string, unknown>;
+  const savedRefs = (params.references as Array<{ identityId: string; assetIds: string[] }> | undefined) ?? [];
+
+  const cast = await Promise.all(
+    j.segment.project.cast.map(async (c) => {
+      const assetIds = savedRefs.find((r) => r.identityId === c.identityId)?.assetIds ?? [];
+      const assets = assetIds.length
+        ? await prisma.identityAsset.findMany({ where: { id: { in: assetIds } } })
+        : [];
+      return {
+        identityId: c.identityId,
+        profileId: c.profileId,
+        slotIndex: c.slotIndex,
+        appearance: c.appearance as Record<string, unknown>,
+        references: await Promise.all(
+          assets.map(async (a) => ({
+            identityId: c.identityId,
+            assetId: a.id,
+            storageKey: a.storageKey,
+            signedUrl: await presignedGet(a.storageKey).catch(() => null),
+            captureSlot: a.captureSlot,
+            expression: a.expression,
+            quality: a.qualityScore ? Number(a.qualityScore) : null,
+          })),
+        ),
+      };
+    }),
+  );
+
   return {
     traceId: '', segmentId: j.segmentId, attempt: j.attempt,
     durationMs: Number(params.durationMs ?? j.segment.endMs - j.segment.startMs),
@@ -324,7 +363,7 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
     prompt: (params.prompt as string) ?? null,
     seed: j.seed ? Number(j.seed) : null,
     conditioningStrength: Number(params.conditioningStrength ?? 0.6),
-    cast: [],
+    cast,
     sourceVideoKey: null, sourceTracksKey: null,
     outputKey: storageKey.segmentOutput(j.segment.projectId, j.segmentId, j.attempt),
   };

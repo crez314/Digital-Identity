@@ -156,6 +156,57 @@ async function main() {
     });
   }
 
+  // ── Higgsfield 실제 모델 (공식 OpenAPI v2.0.0 기준) ────
+  // 능력값은 스펙에서 그대로 옮겼다. costPerSecond는 계약 단가가 확정되면 갱신해야 한다.
+  const higgsfield = [
+    {
+      code: 'higgsfield-veo31-reference',
+      provider: 'EXTERNAL_API',
+      endpoint: '/veo3.1/reference-to-video',
+      // 레퍼런스 이미지 1~3장으로 신원을 조건화한다 — CREZ Identity conditioning의 실제 경로
+      capabilities: { maxDurationMs: 8000, maxPersons: 3, modes: ['reference'], maxResolution: 1080,
+                      durations: [4, 6, 8], endpoint: '/veo3.1/reference-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.4,
+    },
+    {
+      code: 'higgsfield-veo31-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/veo3.1/image-to-video',
+      capabilities: { maxDurationMs: 8000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
+                      durations: [4, 6, 8], endpoint: '/veo3.1/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.3,
+    },
+    {
+      code: 'higgsfield-kling25-pro-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
+                      durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.25,
+    },
+    {
+      code: 'higgsfield-sora2-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/sora-2/image-to-video',
+      capabilities: { maxDurationMs: 12000, maxPersons: 1, modes: ['i2v'], maxResolution: 720,
+                      durations: [4, 8, 12], endpoint: '/sora-2/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.35,
+    },
+  ];
+  for (const m of higgsfield) {
+    await prisma.aiModel.upsert({
+      where: { code: m.code },
+      update: { capabilities: m.capabilities as never, endpoint: m.endpoint, costPerSecond: m.costPerSecond },
+      // 자격증명이 없으면 제출이 실패하므로 기본은 DISABLED로 둔다.
+      // 키를 넣고 PATCH /models/{code}/status 로 ACTIVE 전환한다.
+      create: { ...m, capabilities: m.capabilities as never, status: 'DISABLED', metrics: {} } as never,
+    });
+  }
+
   // ── §10 QC ruleset v1 — 초기 가중치는 기획 초안 제안값 ──
   await prisma.qcRuleset.upsert({
     where: { version: 'qc-v1' },

@@ -55,6 +55,21 @@ RTMDet/RTMPose는 ONNX 가중치가 배치되면 자동으로 사용되고, 없�
 > `--disable-gpl` 구성으로 빌드한 바이너리를 사용해야 한다
 > (`infra/docker/worker.Dockerfile` 주석 참조).
 
+## 3-1. 외부 생성 API (§1 하이브리드)
+
+| 제공자 | 접근 방식 | 계약 출처 | 확인일 |
+| --- | --- | --- | --- |
+| Higgsfield | REST `https://api.higgsfield.ai` | 공식 OpenAPI v2.0.0 (`https://docs.higgsfield.ai/docs/openapi.json`) | 2026-09-02 |
+
+인증은 `Authorization: Key {KEY_ID}:{KEY_SECRET}`이며 Bearer 토큰이 아니다.
+어댑터는 `packages/providers/src/adapters/higgsfield.ts`에 있고, 필드명·enum·경로는
+전부 위 OpenAPI 스펙에서 그대로 옮겼다.
+
+**주의 — 생성 결과물의 권리**는 오픈소스 라이선스와 별개 사안이다. Higgsfield 이용약관상
+출력물의 상업적 이용 범위, 학습 데이터 관련 면책, 생성물 귀속을 계약 체결 시 확인해야 한다.
+CREZ는 실존 인물의 신원을 조건화해 생성하므로, 제공자 약관이 이를 허용하는지
+(특히 인물 레퍼런스 업로드 허용 여부)를 반드시 문서로 확보할 것.
+
 ## 4. 주요 런타임 라이브러리
 
 | 패키지 | 라이선스 | 용도 |

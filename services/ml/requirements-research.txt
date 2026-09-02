@@ -1,0 +1,11 @@
+# research 트랙 전용 의존성 — production 빌드에 포함하지 않는다.
+#
+# 여기 모델들의 배포 가중치는 연구 전용 데이터셋으로 학습되어 상업 이용이 허용되지 않는다.
+# 성능 비교 실험 목적으로만 설치하고, CREZ_ALLOW_RESEARCH_ENCODERS=1 로 명시적으로 켠다.
+# 자세한 근거는 LICENSE_NOTICE.md 참조.
+
+-r requirements.txt
+
+torch==2.5.1                # BSD-3
+torchvision==0.20.1         # BSD-3
+torchreid==1.4.0            # MIT (가중치는 연구 전용)

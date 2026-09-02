@@ -2,3 +2,7 @@ export * from './scoring';
 export * from './rules';
 export * from './regeneration';
 export * from './binding';
+export * from './stats';
+export * from './normalize';
+export * from './severity';
+export * from './fusion';

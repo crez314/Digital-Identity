@@ -36,13 +36,36 @@ const FORBIDDEN_PACKAGES = [
   { name: 'magface', reason: '가중치가 연구용 데이터셋 학습 (§7.1)' },
   { name: 'yolov5', reason: 'AGPL-3.0 (§7.1)' },
   { name: 'yolov8', reason: 'AGPL-3.0 (§7.1)' },
+  // 코드는 퍼미시브이나 배포 가중치가 연구 전용 데이터셋 학습 — research 격리 구역에서만 허용
+  { name: 'torchreid', reason: '가중치가 Market-1501·MSMT17·DukeMTMC(철회) 학습 — 연구 전용 (§7.1)' },
+  { name: 'osnet', reason: '가중치가 연구 전용 Re-ID 데이터셋 학습 (§7.1)' },
+  { name: 'fastreid', reason: '가중치가 연구 전용 Re-ID 데이터셋 학습 (§7.1)' },
 ];
 
 /** 라이선스 정보가 없거나 특이한 패키지 중 검토를 마친 것 */
 const ALLOWLIST = new Set([]);
 
+/**
+ * research 트랙 격리 구역 (§7.1).
+ *
+ * 연구 전용 가중치 모델을 성능 비교 목적으로 다루는 것 자체는 막지 않는다.
+ * 다만 production 경로로 새어나가지 않아야 하므로, 다음 세 곳에서만 참조를 허용한다.
+ *   1. 격리 디렉터리 자체
+ *   2. 격리 전용 의존성 파일
+ *   3. 지연 로딩 다리 역할을 하는 레지스트리 (CREZ_ALLOW_RESEARCH_ENCODERS 가드 안쪽)
+ * 그 밖의 위치에서 참조되면 격리가 깨진 것이므로 빌드를 실패시킨다.
+ */
+const RESEARCH_QUARANTINE = [
+  'services/ml/app/encoders/research/',
+  'services/ml/requirements-research.txt',
+  'services/ml/app/encoders/registry.py',
+];
+
+const inQuarantine = (path) => RESEARCH_QUARANTINE.some((q) => path.startsWith(q));
+
 const violations = [];
 const warnings = [];
+const quarantined = [];
 
 // ── 1. node 의존성 ────────────────────────────────────────
 function scanNodeModules(dir, depth = 0) {
@@ -97,9 +120,14 @@ for (const rel of reqFiles) {
   if (!existsSync(path)) continue;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const name = line.trim().split(/[=<>~\[#]/)[0].trim().toLowerCase();
-    if (!name || line.trim().startsWith('#')) continue;
+    if (!name || line.trim().startsWith('#') || name.startsWith('-r')) continue;
     const forbidden = FORBIDDEN_PACKAGES.find((f) => name.includes(f.name));
-    if (forbidden) violations.push({ kind: 'python', id: `${name} (${rel})`, reason: forbidden.reason });
+    if (forbidden) {
+      violations.push({
+        kind: 'python', id: `${name} (${rel})`,
+        reason: `${forbidden.reason} — production 의존성에 있으면 안 된다`,
+      });
+    }
   }
 }
 
@@ -116,7 +144,15 @@ try {
     for (const line of hits.split('\n')) {
       // 이 스캐너 자신과 문서의 언급은 위반이 아니다
       if (line.startsWith('scripts/license-scan')) continue;
-      violations.push({ kind: 'import', id: line.slice(0, 160), reason: '금지 패키지 import (§7.1)' });
+      const file = line.split(':')[0];
+      if (inQuarantine(file)) {
+        quarantined.push(file);
+        continue;
+      }
+      violations.push({
+        kind: 'import', id: line.slice(0, 160),
+        reason: '격리 구역 밖에서 연구 전용 모델을 참조한다 (§7.1)',
+      });
     }
   }
 } catch {
@@ -126,6 +162,13 @@ try {
 // ── 결과 ──────────────────────────────────────────────────
 console.log(`라이선스 스캔 — ${new Date().toISOString()}`);
 console.log(`금지 라이선스 패턴 ${FORBIDDEN_LICENSES.length}개, 금지 패키지 ${FORBIDDEN_PACKAGES.length}개 검사`);
+
+if (quarantined.length > 0) {
+  const files = [...new Set(quarantined)];
+  console.log(`\nresearch 격리 구역에서만 참조됨 (허용): ${files.length}개 파일`);
+  for (const f of files) console.log(`  - ${f}`);
+  console.log('  → production 빌드·기본 requirements에는 포함되지 않아야 한다.');
+}
 
 if (warnings.length > 0) {
   console.log(`\n확인 필요 ${warnings.length}건 (빌드는 계속됨):`);

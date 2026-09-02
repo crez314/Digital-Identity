@@ -1,0 +1,56 @@
+# 인코더 설정 — 모델 경로를 코드에 하드코딩하지 않는다.
+#
+# track 의미
+#   production : 가중치까지 상업 이용이 명시적으로 허용됨. 기본 선택 대상.
+#   research   : 코드는 퍼미시브이나 가중치가 연구 전용. 비교 실험 전용이며
+#                CREZ_ALLOW_RESEARCH_ENCODERS=1 없이는 로드되지 않는다.
+#
+# 인코더를 교체해도 CREZ 상위 계층(집계·시간일관성·드리프트·융합)은 바뀌지 않는다.
+
+face:
+  default: sface
+  encoders:
+    sface:
+      impl: sface
+      track: production
+      params:
+        detector_path: ${MODEL_DIR}/face_detection_yunet_2023mar.onnx
+        recognizer_path: ${MODEL_DIR}/face_recognition_sface_2021dec.onnx
+        storage_dim: 512          # DB 컬럼 vector(512)에 맞춘 패딩 차원
+
+    # 연구 비교용 — 가중치가 MS1MV2/WebFace4M/CASIA 등 연구 전용 데이터셋 학습
+    adaface:
+      impl: adaface
+      track: research
+      params:
+        checkpoint: ${MODEL_DIR}/research/adaface_ir50_ms1mv2.ckpt
+        architecture: ir_50
+        storage_dim: 512
+
+body:
+  default: appearance
+  encoders:
+    # 퍼미시브 기본 인코더. 전용 ReID 가중치 없이 동작하며,
+    # 상·하체 색분포와 신체 비율을 결합한 CREZ 자체 구현이다.
+    appearance:
+      impl: body_appearance
+      track: production
+      params:
+        dim: 256
+        bins: 16
+
+    osnet:
+      impl: osnet
+      track: research
+      params:
+        model_name: osnet_x1_0
+        weights: ${MODEL_DIR}/research/osnet_x1_0_market1501.pth
+        dim: 512
+
+    fastreid:
+      impl: fastreid
+      track: research
+      params:
+        config_file: ${MODEL_DIR}/research/fastreid_bot_R50.yml
+        weights: ${MODEL_DIR}/research/fastreid_bot_R50.pth
+        dim: 2048

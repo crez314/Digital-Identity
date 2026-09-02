@@ -6,8 +6,10 @@ import { DerivativeKind, FindingType, QcStatus, RegenOutcome, Severity } from '.
 /** §10.1 지표 정의 — 5개 지표 모두 0–1 */
 export const IdentityMetrics = z.object({
   faceSimilarity: z.number().min(0).max(1),
-  bodySimilarity: z.number().min(0).max(1),
+  bodySimilarity: z.number().min(0).max(1).nullable(),
   temporalConsistency: z.number().min(0).max(1),
+  /** 신체의 시간축 안정성 — 신체 신호가 없으면 null */
+  temporalBodyConsistency: z.number().min(0).max(1).nullable().optional(),
   /** 소스 안무가 없으면 산출 불가 — null이면 가중치를 재분배한다 (§10.1) */
   motionConsistency: z.number().min(0).max(1).nullable(),
   bindingStability: z.number().min(0).max(1),

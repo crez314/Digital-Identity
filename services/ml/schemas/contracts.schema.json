@@ -1214,10 +1214,19 @@
               "type": "number"
             },
             "bodySimilarity": {
-              "type": "number"
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "temporalConsistency": {
               "type": "number"
+            },
+            "temporalBodyConsistency": {
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "motionConsistency": {
               "type": [
@@ -1277,6 +1286,18 @@
                     "type": "number"
                   },
                   "embeddingDelta": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "bodySimilarity": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "bodyDelta": {
                     "type": [
                       "number",
                       "null"
@@ -1732,10 +1753,19 @@
                     "type": "number"
                   },
                   "bodySimilarity": {
-                    "type": "number"
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   },
                   "temporalConsistency": {
                     "type": "number"
+                  },
+                  "temporalBodyConsistency": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   },
                   "motionConsistency": {
                     "type": [
@@ -1795,6 +1825,18 @@
                           "type": "number"
                         },
                         "embeddingDelta": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "bodySimilarity": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "bodyDelta": {
                           "type": [
                             "number",
                             "null"
@@ -2287,14 +2329,33 @@
               "maximum": 1
             },
             "bodySimilarity": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "temporalConsistency": {
               "type": "number",
               "minimum": 0,
               "maximum": 1
+            },
+            "temporalBodyConsistency": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "motionConsistency": {
               "anyOf": [

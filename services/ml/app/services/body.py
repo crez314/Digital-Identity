@@ -7,8 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ..encoders.registry import body_encoder as get_body_encoder
 from . import models, storage
-from .imaging import blur_score, exposure_score
 from .mock import seeded_float, seeded_vector
 
 log = logging.getLogger(__name__)
@@ -36,31 +36,17 @@ def body_ratios(keypoints: np.ndarray | None) -> dict[str, float] | None:
     }
 
 
-def color_histogram_embedding(image: np.ndarray, dim: int = models.BODY_DIM) -> np.ndarray:
+def embed_keys(keys: list[str], derive_from_face: bool = True) -> list[dict]:
     """
-    RTMDet/전용 ReID 가중치가 없는 환경의 신체 임베딩 폴백.
-    의상·체형 색분포 기반이라 변별력은 얼굴보다 낮지만, 후면·측면 프레임에서
-    얼굴 임베딩을 보완하는 용도로는 유효하다(§9.2).
+    이미지에서 신체 특징을 추출한다.
+
+    derive_from_face=True이면 얼굴을 먼저 검출해 인체 비례로 신체 영역을 유도한 뒤
+    그 crop을 인코딩한다. **기준 이미지와 영상 프레임이 같은 방식으로 잘려야
+    비교가 성립한다** — 한쪽은 전신 사진 전체, 다른 쪽은 유도된 영역이면
+    구도 차이가 신원 차이로 둔갑한다.
+
+    얼굴이 검출되지 않으면 이미지 전체를 신체 crop으로 본다(전신 사진 가정).
     """
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    # 상·하체를 나눠 각각 히스토그램을 만든다 (상의/하의 구분 정보 보존)
-    h = image.shape[0]
-    parts = [hsv[: h // 2], hsv[h // 2 :]]
-    feats = []
-    bins = dim // (2 * 3)
-    for p in parts:
-        for ch in range(3):
-            hist = cv2.calcHist([p], [ch], None, [bins], [0, 256]).ravel()
-            feats.append(hist)
-    v = np.concatenate(feats).astype(np.float32)
-    if v.size < dim:
-        v = np.pad(v, (0, dim - v.size))
-    v = v[:dim]
-    n = float(np.linalg.norm(v))
-    return v / n if n > 0 else v
-
-
-def embed_keys(keys: list[str]) -> list[dict]:
     if models.is_mock():
         return [
             {
@@ -86,13 +72,37 @@ def embed_keys(keys: list[str]) -> list[dict]:
                 out.append({"imageKey": key, "ok": False, "error": "decode failed",
                             "vector": None, "dim": None, "bodyRatios": None, "quality": None})
                 continue
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            vec = color_histogram_embedding(image)
+
+            crop_img = image
+            derived = False
+            if derive_from_face:
+                from .body_region import crop as crop_region
+                from .body_region import person_region
+                from .face import detect_faces
+
+                faces = detect_faces(image)
+                if faces:
+                    row, _ = max(faces, key=lambda f: f[0][2] * f[0][3])
+                    x, y, w, h = (float(v) for v in row[:4])
+                    fh, fw = image.shape[:2]
+                    sub = crop_region(image, person_region(x, y, w, h, fw, fh))
+                    if sub is not None:
+                        crop_img = sub
+                        derived = True
+
+            encoder = get_body_encoder()
+            result = encoder.encode(crop_img)
+            if not result.ok or result.vector is None:
+                out.append({"imageKey": key, "ok": False, "error": result.error,
+                            "vector": None, "dim": None, "bodyRatios": None, "quality": None})
+                continue
+
             out.append({
                 "imageKey": key, "ok": True, "error": None,
-                "vector": vec.tolist(), "dim": models.BODY_DIM,
+                "vector": result.vector.tolist(), "dim": encoder.info.dim,
                 "bodyRatios": None,  # 포즈 모델 없이는 산출하지 않는다
-                "quality": float(0.5 * blur_score(gray) + 0.5 * exposure_score(gray)),
+                "quality": result.quality,
+                "derivedFromFace": derived,
             })
         except Exception as e:
             log.exception("body embed failed key=%s", key)

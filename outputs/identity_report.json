@@ -1,0 +1,131 @@
+{
+  "reference_id": "CRZ-H001",
+  "run_id": "ecf491cd",
+  "generated_at": "2026-09-02T04:30:17.049Z",
+  "video": {
+    "filename": "generated.mp4",
+    "duration": 4.04,
+    "sampling_fps": 6,
+    "analyzed_frames": 25,
+    "sha256": "beadd6b2b8197dff"
+  },
+  "reference": {
+    "images": 1,
+    "faces_detected": 1,
+    "outliers_excluded": 0,
+    "face_embedding_variance": 0,
+    "body_embedding_variance": 0,
+    "body_reference_available": true
+  },
+  "face": {
+    "mean_similarity": 77.47,
+    "min_similarity": 57.23,
+    "p05_similarity": 59.91,
+    "p10_similarity": 60.35,
+    "median_similarity": 80.19,
+    "std_dev": 0.0874,
+    "temporal_consistency": 57.6,
+    "embedding_variance": 0.00417,
+    "raw_cosine": {
+      "mean": 0.781,
+      "min": 0.6292,
+      "p05": 0.6493
+    }
+  },
+  "body": {
+    "mean_similarity": 69.95,
+    "min_similarity": 67.51,
+    "p05_similarity": 68.03,
+    "p10_similarity": 68.43,
+    "median_similarity": 69.99,
+    "std_dev": 0.0099,
+    "temporal_consistency": 98,
+    "embedding_variance": 0.000005,
+    "raw_cosine": {
+      "mean": 0.7246,
+      "min": 0.7063,
+      "p05": 0.7102
+    }
+  },
+  "binding_stability": 99,
+  "identity_drift": {
+    "drift_frames": 3,
+    "drift_ratio": 0.12,
+    "max_severity": 0.0872,
+    "average_severity": 0.0741,
+    "max_duration_sec": 0.5,
+    "spans": [
+      {
+        "start_sec": 2.67,
+        "end_sec": 3.17,
+        "max_severity": 0.0872,
+        "reasons": [
+          "face_similarity_drop"
+        ]
+      }
+    ]
+  },
+  "score_breakdown": {
+    "faceIdentityScore": 72.2,
+    "bodyIdentityScore": 69.37,
+    "temporalFaceScore": 57.61,
+    "temporalBodyScore": 98.01,
+    "baseScore": 71.84,
+    "driftPenalty": 0.52,
+    "finalScore": 71.32,
+    "contributions": {
+      "faceIdentity": 28.88,
+      "bodyIdentity": 17.34,
+      "temporalFace": 8.64,
+      "temporalBody": 9.8
+    },
+    "bodySignalAvailable": true
+  },
+  "crez_identity_score": 71.32,
+  "provenance": {
+    "encoders": {
+      "detector": "yunet@2023mar",
+      "faceEmbedder": "sface@2021dec",
+      "bodyDetector": "yunet-derived@1",
+      "tracker": "bytetrack-style@1",
+      "poseEstimator": null,
+      "runtime": "onnxruntime-cpu/opencv-4.10.0"
+    },
+    "scoring_config": {
+      "weights": {
+        "faceIdentity": 0.4,
+        "bodyIdentity": 0.25,
+        "temporalFace": 0.15,
+        "temporalBody": 0.1,
+        "driftPenalty": 0.1
+      },
+      "severityWeights": {
+        "faceDrop": 0.35,
+        "bodyDrop": 0.2,
+        "faceInstability": 0.2,
+        "bodyInstability": 0.1,
+        "duration": 0.15
+      },
+      "thresholds": {
+        "faceSimilarityThreshold": 0.7,
+        "bodySimilarityThreshold": 0.65,
+        "faceTemporalDeltaThreshold": 0.18,
+        "bodyTemporalDeltaThreshold": 0.2,
+        "durationSaturationSec": 2,
+        "driftMinDurationFrames": 3
+      },
+      "normalization": {
+        "face": {
+          "floor": 0.2,
+          "ceiling": 0.95
+        },
+        "body": {
+          "floor": 0.2,
+          "ceiling": 0.95
+        }
+      },
+      "tailWeight": 0.3
+    },
+    "note": "외부 모델은 특징 추출만 담당한다. 판정·융합은 @crez/engine 자체 구현."
+  }
+}

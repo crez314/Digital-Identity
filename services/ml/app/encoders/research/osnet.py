@@ -7,7 +7,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ..base import BodyEncoder, EncodeResult, EncoderInfo, EncoderUnavailable, LicenseTrack
+from ..base import (
+    BodyEncoder,
+    EncodeResult,
+    EncoderInfo,
+    EncoderUnavailable,
+    LicenseTrack,
+)
 
 
 def _expand(path: str) -> Path:
@@ -36,7 +42,6 @@ class OSNetEncoder(BodyEncoder):
         if self._model is not None:
             return self._model
         try:
-            import torch
             import torchreid
         except ImportError as e:
             raise EncoderUnavailable(

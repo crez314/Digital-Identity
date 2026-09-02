@@ -6,7 +6,13 @@ from pathlib import Path
 
 import numpy as np
 
-from ..base import BodyEncoder, EncodeResult, EncoderInfo, EncoderUnavailable, LicenseTrack
+from ..base import (
+    BodyEncoder,
+    EncodeResult,
+    EncoderInfo,
+    EncoderUnavailable,
+    LicenseTrack,
+)
 
 
 def _expand(path: str) -> Path:

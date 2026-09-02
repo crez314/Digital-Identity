@@ -9,6 +9,7 @@ opencv-python-headless==4.10.0.84
 scipy==1.15.0            # BSD — Hungarian(linear_sum_assignment), DTW 보조
 boto3==1.35.92           # Apache 2.0 — S3 호환 스토리지
 onnxruntime==1.20.1      # MIT — RTMDet/RTMPose ONNX 추론
+matplotlib==3.10.0          # PSF/BSD 호환 — 실험 결과 도면
 PyYAML==6.0.2               # MIT — 인코더 설정
 httpx==0.28.1
 python-multipart==0.0.20

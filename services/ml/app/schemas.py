@@ -204,7 +204,11 @@ class QcSeriesPoint(BaseModel):
     trackIndex: int | None
     frameQuality: float
     occlusion: float
+    # frame-to-frame 얼굴 변화량
     embeddingDelta: float | None
+    # 신체 신호 — 얼굴과 독립. 기준 신체 벡터가 없으면 None
+    bodySimilarity: float | None = None
+    bodyDelta: float | None = None
 
 
 class TrackSpan(BaseModel):
@@ -217,8 +221,10 @@ class TrackSpan(BaseModel):
 class PerIdentityRawMetrics(BaseModel):
     identityId: str
     faceSimilarity: float
-    bodySimilarity: float
+    bodySimilarity: float | None
     temporalConsistency: float
+    # 신체의 시간축 안정성 — 얼굴과 별도로 산출한다
+    temporalBodyConsistency: float | None = None
     motionConsistency: float | None
     bindingStability: float
     validFrameRatio: float

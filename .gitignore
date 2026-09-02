@@ -11,3 +11,6 @@ __pycache__/
 services/ml/models/*.onnx
 coverage/
 .DS_Store
+
+# PoC 산출물은 커밋한다 (특허 실시예 자료) — 대용량 입력만 제외
+samples/*.mp4

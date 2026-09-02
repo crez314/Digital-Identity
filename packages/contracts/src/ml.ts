@@ -190,8 +190,11 @@ export const QcScoreRequest = z.object({
 export const PerIdentityRawMetrics = z.object({
   identityId: z.string(),
   faceSimilarity: z.number(),
-  bodySimilarity: z.number(),
+  /** 신체 기준 벡터가 없으면 null — 상위 계층이 가중치를 재분배한다 */
+  bodySimilarity: z.number().nullable(),
   temporalConsistency: z.number(),
+  /** 신체의 시간축 안정성. 얼굴과 별도로 산출 */
+  temporalBodyConsistency: z.number().nullable().optional(),
   motionConsistency: z.number().nullable(),
   bindingStability: z.number(),
   validFrameRatio: z.number(),
@@ -205,7 +208,11 @@ export const PerIdentityRawMetrics = z.object({
     trackIndex: z.number().int().nullable(),
     frameQuality: z.number(),
     occlusion: z.number(),
+    /** frame-to-frame 얼굴 변화량 */
     embeddingDelta: z.number().nullable(),
+    /** 신체 신호 — 얼굴과 독립. 기준 신체 벡터가 없으면 null */
+    bodySimilarity: z.number().nullable().optional(),
+    bodyDelta: z.number().nullable().optional(),
   })),
   /** track 단위 판정 근거 (§9.2) */
   trackSpans: z.array(z.object({

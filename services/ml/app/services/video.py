@@ -8,8 +8,12 @@ import cv2
 import numpy as np
 
 from ..config import settings
+from ..encoders.base import EncoderUnavailable
+from ..encoders.registry import body_encoder as get_body_encoder
 from . import face as face_svc
 from . import models, storage
+from .body_region import crop as crop_region
+from .body_region import person_region
 from .imaging import frontality, quality_score
 from .mock import seeded_float, seeded_vector
 from .tracking import ByteTrackStyleTracker, Detection
@@ -75,8 +79,16 @@ def _mock_tracks(video_key: str, duration_ms: int, sample_fps: float, persons: i
     return tracks
 
 
-def analyze(video_key: str, sample_fps: float = 5, max_persons: int = 10) -> dict:
-    """인물 검출 → 트래킹 → 트랙별 대표 임베딩 (§9.1 1–2단계)."""
+def analyze(
+    video_key: str, sample_fps: float = 5, max_persons: int = 10,
+    extract_body: bool = False,
+) -> dict:
+    """
+    인물 검출 → 트래킹 → 트랙별 대표 임베딩 (§9.1 1–2단계).
+
+    extract_body=True이면 프레임마다 신체 영역을 잘라 신체 임베딩도 추출한다.
+    얼굴과 독립적인 신호이므로 얼굴이 흐린 프레임에서도 값을 갖는다.
+    """
     if models.is_mock():
         duration = 10000
         return {
@@ -90,6 +102,15 @@ def analyze(video_key: str, sample_fps: float = 5, max_persons: int = 10) -> dic
     try:
         tracker = ByteTrackStyleTracker(max_persons=max_persons)
         recognizer = models.face_recognizer()
+
+        body_enc = None
+        if extract_body:
+            try:
+                body_enc = get_body_encoder()
+            except EncoderUnavailable as e:
+                # 신체 인코더가 없어도 얼굴 분석은 계속한다. 상위 계층이
+                # 신체 신호 부재를 인지하고 가중치를 재분배한다.
+                log.warning("신체 인코더 사용 불가, 얼굴만 분석한다: %s", e)
 
         for ms, frame in sample_frames(cap, meta, sample_fps):
             detections: list[Detection] = []
@@ -106,11 +127,24 @@ def analyze(video_key: str, sample_fps: float = 5, max_persons: int = 10) -> dic
                 crop = frame[y0 : y0 + int(h), x0 : x0 + int(w)]
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.size else np.zeros((1, 1), np.uint8)
                 front = frontality(landmarks)
+
+                # 신체 영역은 얼굴 bbox에서 인체 비례로 유도한다(body_region 참조).
+                # 인물 검출기를 붙이면 이 부분만 교체된다.
+                body_vector = None
+                if body_enc is not None:
+                    region = person_region(x, y, w, h, meta["width"], meta["height"])
+                    body_crop = crop_region(frame, region)
+                    if body_crop is not None:
+                        br = body_enc.encode(body_crop)
+                        if br.ok and br.vector is not None:
+                            body_vector = br.vector.tolist()
+
                 detections.append(Detection(
                     bbox=(x, y, w, h), score=score, ms=ms,
                     face_vector=feature,
                     face_quality=quality_score(gray, h, meta["height"], front),
                     landmarks=landmarks.tolist(),
+                    body_vector=body_vector,
                 ))
             tracker.update(detections, ms)
 

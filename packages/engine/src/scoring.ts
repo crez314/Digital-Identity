@@ -5,14 +5,22 @@ import type { IdentityMetrics, QcThresholds, ScoreWeights } from '@crez/contract
  * 가중치·임계값은 인자로 주입받는다 — 코드에 하드코딩하지 않는다(DB ruleset).
  */
 
-/** motion_consistency는 소스 안무가 없으면 null이다. 그 경우 가중치를 재분배한다. */
+/**
+ * 결측 지표의 가중치는 남은 지표로 재분배한다.
+ *
+ * motion은 소스 안무가 없으면, body는 신체 기준 벡터나 신체 검출이 없으면 null이다.
+ * 결측을 0점으로 두면 "측정하지 못함"이 "일치하지 않음"으로 둔갑해,
+ * 후면 촬영이나 안무 미제공 영상이 부당하게 낮은 점수를 받는다.
+ */
 export function compositeScore(m: IdentityMetrics, w: ScoreWeights): number {
   const parts: Array<[number, number]> = [
     [w.face, m.faceSimilarity],
-    [w.body, m.bodySimilarity],
     [w.temporal, m.temporalConsistency],
     [w.binding, m.bindingStability],
   ];
+  if (m.bodySimilarity !== null && m.bodySimilarity !== undefined) {
+    parts.push([w.body, m.bodySimilarity]);
+  }
   if (m.motionConsistency !== null) parts.push([w.motion, m.motionConsistency]);
 
   const totalWeight = parts.reduce((s, [weight]) => s + weight, 0);

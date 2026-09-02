@@ -107,6 +107,67 @@ cd services/ml && pytest # ML 서비스 테스트 (mock 모드)
 WORKER_QUEUES=analysis,qc pnpm --filter @crez/worker dev
 ```
 
+## Identity Consistency 분석 (PoC)
+
+기준 인물 이미지와 생성 영상을 비교해 신원 일관성을 정량 평가한다.
+
+```bash
+pnpm infra:up                       # postgres·redis·minio
+cd services/ml && ML_MODE=cpu ./.venv/bin/uvicorn app.main:app --port 8000 &
+
+pnpm analyze -- \
+  --reference ./samples/reference \
+  --video ./samples/generated.mp4 \
+  --output ./outputs \
+  --sampling-fps 2
+```
+
+산출물 — `identity_report.json` · `frame_metrics.csv` · `similarity_graph.png`
+
+### 무엇이 오픈소스이고 무엇이 CREZ 구현인가
+
+이 구분이 코드와 문서에서 명확해야 한다.
+
+**Open-source components** — 특징 추출만 담당한다
+
+| 구성요소 | 역할 |
+| --- | --- |
+| YuNet (MIT) | 얼굴 검출 |
+| SFace (Apache-2.0) | 얼굴 임베딩 |
+| ByteTrack 방식 (MIT 알고리즘) | 다중 인물 추적 |
+| AdaFace · OSNet · FastReID | **research 트랙 — 비교 실험 전용, 상업 이용 불가** |
+
+**CREZ proprietary implementation** — 판정과 융합
+
+| 모듈 | 위치 |
+| --- | --- |
+| Reference Identity Aggregation | `services/ml/app/services/aggregate.py` |
+| Body Appearance Encoder | `services/ml/app/encoders/body_appearance.py` |
+| Frame-level Identity Scoring | `services/ml/app/services/qc.py` |
+| Temporal Face / Body Consistency | `qc.py` + `packages/engine/src/scoring.ts` |
+| Identity Drift Detection | `packages/engine/src/rules.ts` |
+| Drift Severity Calculation | `packages/engine/src/severity.ts` |
+| Multi-metric Score Fusion | `packages/engine/src/fusion.ts` |
+| Statistics / Normalization | `packages/engine/src/{stats,normalize}.ts` |
+
+외부 모델의 출력값을 그대로 CREZ Score로 쓰지 않는다. 인코더는 코사인 유사도
+하나만 주고, 그것을 시간축·다중 신호·드리프트와 결합해 점수를 만드는 계층이
+CREZ 구현이다. 따라서 인코더를 교체해도 판정 구조는 유지된다.
+
+### 인코더 교체
+
+모델 경로는 코드에 없고 `services/ml/configs/encoders.yaml`에 있다.
+
+```bash
+CREZ_FACE_ENCODER=sface pnpm analyze -- ...
+
+# research 트랙은 명시적으로 켜야 한다 (가중치 상업 이용 불가)
+CREZ_ALLOW_RESEARCH_ENCODERS=1 CREZ_FACE_ENCODER=adaface pnpm analyze -- ...
+```
+
+라이선스 근거와 격리 방식은 [LICENSE_NOTICE.md](LICENSE_NOTICE.md),
+개발 이력과 수식 변경은 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)를 참조한다.
+
 ## 생성 모델 연동
 
 기본은 `mock`(FFmpeg 컬러바)이며 실제 생성에는 Higgsfield를 연동한다.

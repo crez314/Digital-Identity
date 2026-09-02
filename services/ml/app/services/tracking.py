@@ -36,6 +36,7 @@ class Detection:
     face_vector: list[float] | None = None
     face_quality: float | None = None
     landmarks: list[list[float]] | None = None
+    body_vector: list[float] | None = None
 
 
 @dataclass
@@ -118,6 +119,7 @@ class ByteTrackStyleTracker:
             "keypoints": None,
             "faceQuality": det.face_quality,
             "faceVector": det.face_vector,
+            "bodyVector": det.body_vector,
             "occlusion": 0.7 if occluded else 0.0,
         })
 

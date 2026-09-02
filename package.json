@@ -3,7 +3,9 @@
   "private": true,
   "version": "1.1.0",
   "description": "CREZ Digital Identity Content Engine",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "turbo run build",
@@ -18,7 +20,8 @@
     "contracts:jsonschema": "pnpm --filter @crez/contracts run jsonschema",
     "licenses:check": "node scripts/license-scan.mjs",
     "infra:up": "docker compose -f .devcontainer/docker-compose.yml up -d postgres redis minio ml",
-    "infra:down": "docker compose -f .devcontainer/docker-compose.yml down"
+    "infra:down": "docker compose -f .devcontainer/docker-compose.yml down",
+    "analyze": "tsx scripts/analyze-identity.ts"
   },
   "devDependencies": {
     "turbo": "^2.3.3",

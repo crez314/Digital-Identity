@@ -14,7 +14,13 @@ import cv2
 import numpy as np
 
 from ..services.imaging import frontality, quality_score
-from .base import EncodeResult, EncoderInfo, EncoderUnavailable, FaceEncoder, LicenseTrack
+from .base import (
+    EncodeResult,
+    EncoderInfo,
+    EncoderUnavailable,
+    FaceEncoder,
+    LicenseTrack,
+)
 
 log = logging.getLogger(__name__)
 

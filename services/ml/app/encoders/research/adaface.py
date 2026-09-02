@@ -8,7 +8,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from ..base import EncodeResult, EncoderInfo, EncoderUnavailable, FaceEncoder, LicenseTrack
+from ..base import (
+    EncodeResult,
+    EncoderInfo,
+    EncoderUnavailable,
+    FaceEncoder,
+    LicenseTrack,
+)
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +52,7 @@ class AdaFaceEncoder(FaceEncoder):
         if self._model is not None:
             return self._model
         try:
-            import torch  # noqa: F401
+            import torch
         except ImportError as e:
             raise EncoderUnavailable(
                 "AdaFace를 쓰려면 torch가 필요합니다: "
@@ -56,6 +62,7 @@ class AdaFaceEncoder(FaceEncoder):
             raise EncoderUnavailable(f"AdaFace 체크포인트 없음: {self._ckpt}")
 
         import torch
+
         from .adaface_net import build_model  # 공식 구현의 backbone 정의
 
         model = build_model(self._arch)

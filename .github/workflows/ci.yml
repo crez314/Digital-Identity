@@ -1,0 +1,105 @@
+# §19 Phase 0 — CI 파이프라인 (lint, test, 스키마 정합성 검사, 라이선스 스캐너)
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+env:
+  DATABASE_URL: postgresql://crez:crez@localhost:5432/crez?schema=public
+  REDIS_URL: redis://localhost:6379
+  FIELD_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+
+jobs:
+  # §7.4 금지 라이선스 의존성이 추가되면 빌드를 실패시킨다. 가장 먼저 돌린다.
+  licenses:
+    name: 라이선스 스캔
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm licenses:check
+
+  node:
+    name: Node (typecheck · test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: crez
+          POSTGRES_PASSWORD: crez
+          POSTGRES_DB: crez
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U crez" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm db:generate
+      - name: 마이그레이션 적용
+        run: pnpm db:deploy
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: 시드 동작 확인
+        run: pnpm db:seed
+
+  # §3 packages/contracts가 단일 출처다. 생성물이 커밋본과 다르면 실패시킨다.
+  contracts:
+    name: 스키마 정합성
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm }
+      - run: pnpm install --frozen-lockfile=false
+      - run: pnpm contracts:jsonschema
+      - name: 생성된 JSON Schema가 커밋본과 동일한지 확인
+        run: |
+          if ! git diff --exit-code services/ml/schemas/contracts.schema.json; then
+            echo "::error::contracts 변경 후 'pnpm contracts:jsonschema'를 실행하고 커밋하세요."
+            exit 1
+          fi
+
+  python:
+    name: Python (crez-ml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r services/ml/requirements-dev.txt
+      - name: ruff
+        run: ruff check services/ml/app
+      - name: pytest (mock 모드 — GPU·모델 가중치 불필요)
+        working-directory: services/ml
+        env: { ML_MODE: mock }
+        run: pytest -q
+
+  docker:
+    name: 이미지 빌드
+    runs-on: ubuntu-latest
+    needs: [licenses]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: crez-ml 이미지
+        uses: docker/build-push-action@v6
+        with: { context: services/ml, push: false }

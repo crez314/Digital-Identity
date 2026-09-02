@@ -1,0 +1,13 @@
+# §7.1 채택 모델은 전부 퍼미시브 라이선스다. AGPL·비상업 패키지는 반입 금지(§7.4 CI 스캐너).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+numpy==2.2.1
+# opencv-python(Apache 2.0)은 YuNet(FaceDetectorYN)과 SFace(FaceRecognizerSF)를 내장 API로 제공한다.
+opencv-python-headless==4.10.0.84
+scipy==1.15.0            # BSD — Hungarian(linear_sum_assignment), DTW 보조
+boto3==1.35.92           # Apache 2.0 — S3 호환 스토리지
+onnxruntime==1.20.1      # MIT — RTMDet/RTMPose ONNX 추론
+httpx==0.28.1
+python-multipart==0.0.20

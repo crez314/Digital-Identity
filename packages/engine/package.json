@@ -1,0 +1,14 @@
+{
+  "name": "@crez/engine",
+  "version": "1.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "@crez/contracts": "workspace:*", "@crez/shared": "workspace:*" },
+  "devDependencies": { "typescript": "^5.6.3", "vitest": "^2.1.8" }
+}

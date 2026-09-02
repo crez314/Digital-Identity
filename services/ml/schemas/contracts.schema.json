@@ -1,0 +1,2578 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CREZ DICE contracts (generated — do not edit by hand)",
+  "generatedFrom": "packages/contracts/src/{ml,qc,jobs}.ts",
+  "definitions": {
+    "AggregateRequest": {
+      "$ref": "#/definitions/AggregateRequest",
+      "definitions": {
+        "AggregateRequest": {
+          "type": "object",
+          "properties": {
+            "vectors": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "vector": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "quality": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "vector",
+                  "quality"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "outlierSigma": {
+              "type": "number",
+              "default": 3
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "vectors"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "AggregateResponse": {
+      "$ref": "#/definitions/AggregateResponse",
+      "definitions": {
+        "AggregateResponse": {
+          "type": "object",
+          "properties": {
+            "centroid": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "dim": {
+              "type": "integer"
+            },
+            "variance": {
+              "type": "number"
+            },
+            "meanPairwiseSimilarity": {
+              "type": "number"
+            },
+            "outlierIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "usedIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "centroid",
+            "dim",
+            "variance",
+            "meanPairwiseSimilarity",
+            "outlierIds",
+            "usedIds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "ArtifactSpan": {
+      "$ref": "#/definitions/ArtifactSpan",
+      "definitions": {
+        "ArtifactSpan": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "FACE_ARTIFACT",
+                "HAND_ARTIFACT",
+                "TEMPORAL_FLICKER",
+                "FRAME_ANOMALY"
+              ]
+            },
+            "startMs": {
+              "type": "integer"
+            },
+            "endMs": {
+              "type": "integer"
+            },
+            "score": {
+              "type": "number"
+            },
+            "frameIndices": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "startMs",
+            "endMs",
+            "score",
+            "frameIndices"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "AssignmentResult": {
+      "$ref": "#/definitions/AssignmentResult",
+      "definitions": {
+        "AssignmentResult": {
+          "type": "object",
+          "properties": {
+            "trackIndex": {
+              "type": "integer"
+            },
+            "identityId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "similarity": {
+              "type": "number"
+            },
+            "runnerUpIdentityId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runnerUpSimilarity": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "margin": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "trackIndex",
+            "identityId",
+            "similarity",
+            "runnerUpIdentityId",
+            "runnerUpSimilarity",
+            "margin"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "BBox": {
+      "$ref": "#/definitions/BBox",
+      "definitions": {
+        "BBox": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "w": {
+              "type": "number"
+            },
+            "h": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "w",
+            "h"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "BodyEmbeddingResult": {
+      "$ref": "#/definitions/BodyEmbeddingResult",
+      "definitions": {
+        "BodyEmbeddingResult": {
+          "type": "object",
+          "properties": {
+            "imageKey": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vector": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dim": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bodyRatios": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "quality": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "imageKey",
+            "ok",
+            "vector",
+            "dim",
+            "bodyRatios",
+            "quality"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "EmbedBodyRequest": {
+      "$ref": "#/definitions/EmbedBodyRequest",
+      "definitions": {
+        "EmbedBodyRequest": {
+          "type": "object",
+          "properties": {
+            "imageKeys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "imageKeys"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "EmbedBodyResponse": {
+      "$ref": "#/definitions/EmbedBodyResponse",
+      "definitions": {
+        "EmbedBodyResponse": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "imageKey": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "vector": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "dim": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "bodyRatios": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "quality": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "imageKey",
+                  "ok",
+                  "vector",
+                  "dim",
+                  "bodyRatios",
+                  "quality"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "results",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "EmbedFaceRequest": {
+      "$ref": "#/definitions/EmbedFaceRequest",
+      "definitions": {
+        "EmbedFaceRequest": {
+          "type": "object",
+          "properties": {
+            "imageKeys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "imageKeys"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "EmbedFaceResponse": {
+      "$ref": "#/definitions/EmbedFaceResponse",
+      "definitions": {
+        "EmbedFaceResponse": {
+          "type": "object",
+          "properties": {
+            "results": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "imageKey": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "vector": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "dim": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "quality": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "bbox": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "x": {
+                            "type": "number"
+                          },
+                          "y": {
+                            "type": "number"
+                          },
+                          "w": {
+                            "type": "number"
+                          },
+                          "h": {
+                            "type": "number"
+                          }
+                        },
+                        "required": [
+                          "x",
+                          "y",
+                          "w",
+                          "h"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "landmarks": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "minItems": 2,
+                          "maxItems": 2,
+                          "items": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "frontality": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "imageKey",
+                  "ok",
+                  "vector",
+                  "dim",
+                  "quality",
+                  "bbox",
+                  "landmarks"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "results",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "ExtractFramesRequest": {
+      "$ref": "#/definitions/ExtractFramesRequest",
+      "definitions": {
+        "ExtractFramesRequest": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "timestampsMs": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 1,
+              "maxItems": 50
+            },
+            "outputPrefix": {
+              "type": "string"
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "videoKey",
+            "timestampsMs",
+            "outputPrefix"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "ExtractFramesResponse": {
+      "$ref": "#/definitions/ExtractFramesResponse",
+      "definitions": {
+        "ExtractFramesResponse": {
+          "type": "object",
+          "properties": {
+            "frames": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ms",
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "frames"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "FaceEmbeddingResult": {
+      "$ref": "#/definitions/FaceEmbeddingResult",
+      "definitions": {
+        "FaceEmbeddingResult": {
+          "type": "object",
+          "properties": {
+            "imageKey": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vector": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dim": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "quality": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bbox": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "w": {
+                      "type": "number"
+                    },
+                    "h": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y",
+                    "w",
+                    "h"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "landmarks": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "frontality": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "imageKey",
+            "ok",
+            "vector",
+            "dim",
+            "quality",
+            "bbox",
+            "landmarks"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "IdentityAssignRequest": {
+      "$ref": "#/definitions/IdentityAssignRequest",
+      "definitions": {
+        "IdentityAssignRequest": {
+          "type": "object",
+          "properties": {
+            "tracks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "trackIndex": {
+                    "type": "integer"
+                  },
+                  "faceCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "bodyCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "quality": {
+                    "type": "number"
+                  },
+                  "frames": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ms": {
+                          "type": "integer"
+                        },
+                        "faceVector": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "faceQuality": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "occlusion": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "ms",
+                        "faceVector",
+                        "faceQuality"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "trackIndex",
+                  "faceCentroid",
+                  "bodyCentroid",
+                  "quality"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "references": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identityId": {
+                    "type": "string"
+                  },
+                  "faceCentroid": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "bodyCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "identityId",
+                  "faceCentroid"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tracks",
+            "references"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "IdentityAssignResponse": {
+      "$ref": "#/definitions/IdentityAssignResponse",
+      "definitions": {
+        "IdentityAssignResponse": {
+          "type": "object",
+          "properties": {
+            "assignments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "trackIndex": {
+                    "type": "integer"
+                  },
+                  "identityId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "similarity": {
+                    "type": "number"
+                  },
+                  "runnerUpIdentityId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "runnerUpSimilarity": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "margin": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "trackIndex",
+                  "identityId",
+                  "similarity",
+                  "runnerUpIdentityId",
+                  "runnerUpSimilarity",
+                  "margin"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "similaritySeries": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "ms": {
+                      "type": "integer"
+                    },
+                    "similarity": {
+                      "type": "number"
+                    },
+                    "trackIndex": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ms",
+                    "similarity",
+                    "trackIndex"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "costMatrix": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "assignments",
+            "similaritySeries",
+            "costMatrix",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "ModelBundle": {
+      "$ref": "#/definitions/ModelBundle",
+      "definitions": {
+        "ModelBundle": {
+          "type": "object",
+          "properties": {
+            "detector": {
+              "type": "string"
+            },
+            "faceEmbedder": {
+              "type": "string"
+            },
+            "bodyDetector": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tracker": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "poseEstimator": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runtime": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "detector",
+            "faceEmbedder",
+            "runtime"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "PerIdentityRawMetrics": {
+      "$ref": "#/definitions/PerIdentityRawMetrics",
+      "definitions": {
+        "PerIdentityRawMetrics": {
+          "type": "object",
+          "properties": {
+            "identityId": {
+              "type": "string"
+            },
+            "faceSimilarity": {
+              "type": "number"
+            },
+            "bodySimilarity": {
+              "type": "number"
+            },
+            "temporalConsistency": {
+              "type": "number"
+            },
+            "motionConsistency": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "bindingStability": {
+              "type": "number"
+            },
+            "validFrameRatio": {
+              "type": "number"
+            },
+            "series": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "similarity": {
+                    "type": "number"
+                  },
+                  "runnerUpSimilarity": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "runnerUpIdentityId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "nearestIdentityId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "trackIndex": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "frameQuality": {
+                    "type": "number"
+                  },
+                  "occlusion": {
+                    "type": "number"
+                  },
+                  "embeddingDelta": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "ms",
+                  "similarity",
+                  "runnerUpSimilarity",
+                  "runnerUpIdentityId",
+                  "nearestIdentityId",
+                  "trackIndex",
+                  "frameQuality",
+                  "occlusion",
+                  "embeddingDelta"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "trackSpans": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "trackIndex": {
+                    "type": "integer"
+                  },
+                  "startMs": {
+                    "type": "integer"
+                  },
+                  "endMs": {
+                    "type": "integer"
+                  },
+                  "assigned": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "trackIndex",
+                  "startMs",
+                  "endMs",
+                  "assigned"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "identityId",
+            "faceSimilarity",
+            "bodySimilarity",
+            "temporalConsistency",
+            "motionConsistency",
+            "bindingStability",
+            "validFrameRatio",
+            "series",
+            "trackSpans"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "PersonTrack": {
+      "$ref": "#/definitions/PersonTrack",
+      "definitions": {
+        "PersonTrack": {
+          "type": "object",
+          "properties": {
+            "trackIndex": {
+              "type": "integer"
+            },
+            "startMs": {
+              "type": "integer"
+            },
+            "endMs": {
+              "type": "integer"
+            },
+            "faceCentroid": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bodyCentroid": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "quality": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "frameCount": {
+              "type": "integer"
+            },
+            "frames": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "bbox": {
+                    "type": "object",
+                    "properties": {
+                      "x": {
+                        "type": "number"
+                      },
+                      "y": {
+                        "type": "number"
+                      },
+                      "w": {
+                        "type": "number"
+                      },
+                      "h": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y",
+                      "w",
+                      "h"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "keypoints": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "array",
+                          "minItems": 3,
+                          "maxItems": 3,
+                          "items": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "number"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "faceQuality": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "faceVector": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "occlusion": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "ms",
+                  "bbox",
+                  "faceQuality"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "trackIndex",
+            "startMs",
+            "endMs",
+            "faceCentroid",
+            "bodyCentroid",
+            "quality",
+            "frameCount",
+            "frames"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcArtifactRequest": {
+      "$ref": "#/definitions/QcArtifactRequest",
+      "definitions": {
+        "QcArtifactRequest": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "sampleFps": {
+              "type": "number",
+              "default": 5
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "videoKey"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcArtifactResponse": {
+      "$ref": "#/definitions/QcArtifactResponse",
+      "definitions": {
+        "QcArtifactResponse": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "spans": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "FACE_ARTIFACT",
+                      "HAND_ARTIFACT",
+                      "TEMPORAL_FLICKER",
+                      "FRAME_ANOMALY"
+                    ]
+                  },
+                  "startMs": {
+                    "type": "integer"
+                  },
+                  "endMs": {
+                    "type": "integer"
+                  },
+                  "score": {
+                    "type": "number"
+                  },
+                  "frameIndices": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "startMs",
+                  "endMs",
+                  "score",
+                  "frameIndices"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "videoKey",
+            "spans",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcScoreRequest": {
+      "$ref": "#/definitions/QcScoreRequest",
+      "definitions": {
+        "QcScoreRequest": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "references": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identityId": {
+                    "type": "string"
+                  },
+                  "faceCentroid": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "bodyCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "bodyRatios": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "identityId",
+                  "faceCentroid"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1
+            },
+            "sourceTracksKey": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sampleFps": {
+              "type": "number",
+              "default": 5
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "videoKey",
+            "references"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcScoreResponse": {
+      "$ref": "#/definitions/QcScoreResponse",
+      "definitions": {
+        "QcScoreResponse": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "durationMs": {
+              "type": "integer"
+            },
+            "perIdentity": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "identityId": {
+                    "type": "string"
+                  },
+                  "faceSimilarity": {
+                    "type": "number"
+                  },
+                  "bodySimilarity": {
+                    "type": "number"
+                  },
+                  "temporalConsistency": {
+                    "type": "number"
+                  },
+                  "motionConsistency": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "bindingStability": {
+                    "type": "number"
+                  },
+                  "validFrameRatio": {
+                    "type": "number"
+                  },
+                  "series": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ms": {
+                          "type": "integer"
+                        },
+                        "similarity": {
+                          "type": "number"
+                        },
+                        "runnerUpSimilarity": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "runnerUpIdentityId": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "nearestIdentityId": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "trackIndex": {
+                          "anyOf": [
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "frameQuality": {
+                          "type": "number"
+                        },
+                        "occlusion": {
+                          "type": "number"
+                        },
+                        "embeddingDelta": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "ms",
+                        "similarity",
+                        "runnerUpSimilarity",
+                        "runnerUpIdentityId",
+                        "nearestIdentityId",
+                        "trackIndex",
+                        "frameQuality",
+                        "occlusion",
+                        "embeddingDelta"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "trackSpans": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "trackIndex": {
+                          "type": "integer"
+                        },
+                        "startMs": {
+                          "type": "integer"
+                        },
+                        "endMs": {
+                          "type": "integer"
+                        },
+                        "assigned": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "trackIndex",
+                        "startMs",
+                        "endMs",
+                        "assigned"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "identityId",
+                  "faceSimilarity",
+                  "bodySimilarity",
+                  "temporalConsistency",
+                  "motionConsistency",
+                  "bindingStability",
+                  "validFrameRatio",
+                  "series",
+                  "trackSpans"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "videoKey",
+            "durationMs",
+            "perIdentity",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "TrackFrame": {
+      "$ref": "#/definitions/TrackFrame",
+      "definitions": {
+        "TrackFrame": {
+          "type": "object",
+          "properties": {
+            "ms": {
+              "type": "integer"
+            },
+            "bbox": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
+                },
+                "y": {
+                  "type": "number"
+                },
+                "w": {
+                  "type": "number"
+                },
+                "h": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "x",
+                "y",
+                "w",
+                "h"
+              ],
+              "additionalProperties": false
+            },
+            "keypoints": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "items": [
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "faceQuality": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "faceVector": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "occlusion": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "ms",
+            "bbox",
+            "faceQuality"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "VideoAnalyzeRequest": {
+      "$ref": "#/definitions/VideoAnalyzeRequest",
+      "definitions": {
+        "VideoAnalyzeRequest": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "sampleFps": {
+              "type": "number",
+              "default": 5
+            },
+            "maxPersons": {
+              "type": "integer",
+              "default": 10
+            },
+            "extractKeypoints": {
+              "type": "boolean",
+              "default": true
+            },
+            "traceId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "videoKey"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "VideoAnalyzeResponse": {
+      "$ref": "#/definitions/VideoAnalyzeResponse",
+      "definitions": {
+        "VideoAnalyzeResponse": {
+          "type": "object",
+          "properties": {
+            "videoKey": {
+              "type": "string"
+            },
+            "durationMs": {
+              "type": "integer"
+            },
+            "fps": {
+              "type": "number"
+            },
+            "width": {
+              "type": "integer"
+            },
+            "height": {
+              "type": "integer"
+            },
+            "tracks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "trackIndex": {
+                    "type": "integer"
+                  },
+                  "startMs": {
+                    "type": "integer"
+                  },
+                  "endMs": {
+                    "type": "integer"
+                  },
+                  "faceCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "bodyCentroid": {
+                    "anyOf": [
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "quality": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "frameCount": {
+                    "type": "integer"
+                  },
+                  "frames": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ms": {
+                          "type": "integer"
+                        },
+                        "bbox": {
+                          "type": "object",
+                          "properties": {
+                            "x": {
+                              "type": "number"
+                            },
+                            "y": {
+                              "type": "number"
+                            },
+                            "w": {
+                              "type": "number"
+                            },
+                            "h": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "x",
+                            "y",
+                            "w",
+                            "h"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "keypoints": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "array",
+                                "minItems": 3,
+                                "maxItems": 3,
+                                "items": [
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "number"
+                                  },
+                                  {
+                                    "type": "number"
+                                  }
+                                ]
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "faceQuality": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "faceVector": {
+                          "anyOf": [
+                            {
+                              "type": "array",
+                              "items": {
+                                "type": "number"
+                              }
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "occlusion": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "ms",
+                        "bbox",
+                        "faceQuality"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "trackIndex",
+                  "startMs",
+                  "endMs",
+                  "faceCentroid",
+                  "bodyCentroid",
+                  "quality",
+                  "frameCount",
+                  "frames"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "modelBundle": {
+              "type": "object",
+              "properties": {
+                "detector": {
+                  "type": "string"
+                },
+                "faceEmbedder": {
+                  "type": "string"
+                },
+                "bodyDetector": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "tracker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "poseEstimator": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "runtime": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "detector",
+                "faceEmbedder",
+                "runtime"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "videoKey",
+            "durationMs",
+            "fps",
+            "width",
+            "height",
+            "tracks",
+            "modelBundle"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "IdentityMetrics": {
+      "$ref": "#/definitions/IdentityMetrics",
+      "definitions": {
+        "IdentityMetrics": {
+          "type": "object",
+          "properties": {
+            "faceSimilarity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "bodySimilarity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "temporalConsistency": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "motionConsistency": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bindingStability": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "validFrameRatio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "faceSimilarity",
+            "bodySimilarity",
+            "temporalConsistency",
+            "motionConsistency",
+            "bindingStability"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "ScoreWeights": {
+      "$ref": "#/definitions/ScoreWeights",
+      "definitions": {
+        "ScoreWeights": {
+          "type": "object",
+          "properties": {
+            "face": {
+              "type": "number"
+            },
+            "body": {
+              "type": "number"
+            },
+            "temporal": {
+              "type": "number"
+            },
+            "binding": {
+              "type": "number"
+            },
+            "motion": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "face",
+            "body",
+            "temporal",
+            "binding",
+            "motion"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcThresholds": {
+      "$ref": "#/definitions/QcThresholds",
+      "definitions": {
+        "QcThresholds": {
+          "type": "object",
+          "properties": {
+            "perIdentityMin": {
+              "type": "number"
+            },
+            "maxSpread": {
+              "type": "number"
+            },
+            "overallMin": {
+              "type": "number"
+            },
+            "driftDropRatio": {
+              "type": "number"
+            },
+            "driftMinDurationSec": {
+              "type": "number"
+            },
+            "blendMargin": {
+              "type": "number"
+            },
+            "blendMinDurationSec": {
+              "type": "number"
+            },
+            "swapMinDurationSec": {
+              "type": "number"
+            },
+            "flickerZScore": {
+              "type": "number"
+            },
+            "trackLostMinDurationSec": {
+              "type": "number"
+            },
+            "minFrameQuality": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "perIdentityMin",
+            "maxSpread",
+            "overallMin",
+            "driftDropRatio",
+            "driftMinDurationSec",
+            "blendMargin",
+            "blendMinDurationSec",
+            "swapMinDurationSec",
+            "flickerZScore",
+            "trackLostMinDurationSec",
+            "minFrameQuality"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "JobBase": {
+      "$ref": "#/definitions/JobBase",
+      "definitions": {
+        "JobBase": {
+          "type": "object",
+          "properties": {
+            "traceId": {
+              "type": "string"
+            },
+            "orgId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "projectId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "segmentId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attempt": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "traceId",
+            "orgId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "QcJobPayload": {
+      "$ref": "#/definitions/QcJobPayload",
+      "definitions": {
+        "QcJobPayload": {
+          "type": "object",
+          "properties": {
+            "traceId": {
+              "type": "string"
+            },
+            "orgId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "projectId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "segmentId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attempt": {
+              "type": "integer"
+            },
+            "outputId": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "traceId",
+            "orgId",
+            "projectId",
+            "segmentId",
+            "attempt",
+            "outputId"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "GenerationJobPayload": {
+      "$ref": "#/definitions/GenerationJobPayload",
+      "definitions": {
+        "GenerationJobPayload": {
+          "type": "object",
+          "properties": {
+            "traceId": {
+              "type": "string"
+            },
+            "orgId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "projectId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "segmentId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "attempt": {
+              "type": "integer"
+            },
+            "modelHint": {
+              "type": "string"
+            },
+            "strategy": {
+              "type": "object",
+              "properties": {
+                "step": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "params": {
+                  "type": "object",
+                  "additionalProperties": {}
+                },
+                "rationale": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "step",
+                "kind",
+                "params",
+                "rationale"
+              ],
+              "additionalProperties": false
+            },
+            "regenerationTaskId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "scoreBefore": {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "traceId",
+            "orgId",
+            "projectId",
+            "segmentId",
+            "attempt"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+}

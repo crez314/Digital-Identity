@@ -1,0 +1,50 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "api",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@crez/api", "dev"],
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "worker",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@crez/worker", "dev"],
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "web",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@crez/web", "dev"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "ml",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--reload", "--port", "8000"],
+      "cwd": "${workspaceFolder}/services/ml",
+      "python": "${workspaceFolder}/services/ml/.venv/bin/python",
+      "env": { "ML_MODE": "cpu" }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "전체 스택 (api + worker + web + ml)",
+      "configurations": ["api", "worker", "web", "ml"],
+      "stopAll": true
+    }
+  ]
+}

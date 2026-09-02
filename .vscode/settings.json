@@ -1,0 +1,15 @@
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" },
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true
+  },
+  "python.defaultInterpreterPath": "services/ml/.venv/bin/python",
+  "python.analysis.extraPaths": ["services/ml"],
+  "files.exclude": { "**/.turbo": true, "**/dist": true, "**/.next": true },
+  "prisma.showPrismaDataPlatformNotification": false
+}

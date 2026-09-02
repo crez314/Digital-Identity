@@ -1,0 +1,50 @@
+# 운영 근사 구성. 실제 배포는 infra/k8s를 사용한다.
+name: crez-dice-prod
+
+services:
+  api:
+    build: { context: ../.., dockerfile: infra/docker/api.Dockerfile }
+    env_file: [../../.env]
+    ports: ["3001:3001"]
+    depends_on: [postgres, redis]
+
+  worker-cpu:
+    build: { context: ../.., dockerfile: infra/docker/worker.Dockerfile }
+    env_file: [../../.env]
+    environment:
+      WORKER_QUEUES: ingest,generation,regeneration,media
+    depends_on: [postgres, redis]
+
+  # GPU 바운드 큐는 별도 노드에 배치한다 (§8 analysis 동시성 2)
+  worker-gpu:
+    build: { context: ../.., dockerfile: infra/docker/worker.Dockerfile }
+    env_file: [../../.env]
+    environment:
+      WORKER_QUEUES: analysis,qc
+    depends_on: [postgres, redis]
+
+  web:
+    build: { context: ../.., dockerfile: infra/docker/web.Dockerfile }
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+  ml:
+    build: { context: ../../services/ml }
+    env_file: [../../.env]
+    volumes: ["../../services/ml/models:/app/models:ro"]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: crez
+      POSTGRES_PASSWORD: crez
+      POSTGRES_DB: crez
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7-alpine
+    volumes: ["redisdata:/data"]
+
+volumes:
+  pgdata:
+  redisdata:

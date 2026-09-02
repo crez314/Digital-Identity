@@ -1,0 +1,29 @@
+{
+  "name": "CREZ DICE",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "postgres",
+  "workspaceFolder": "/workspaces/crez-dice",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.11" },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "postCreateCommand": "corepack enable && pnpm install && pnpm db:generate",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "Prisma.prisma",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker",
+        "humao.rest-client",
+        "usernamehw.errorlens",
+        "bradlc.vscode-tailwindcss"
+      ]
+    }
+  },
+  "forwardPorts": [3000, 3001, 5432, 6379, 8000, 9000, 9001]
+}

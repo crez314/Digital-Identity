@@ -1,0 +1,31 @@
+{
+  "name": "@crez/worker",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@crez/contracts": "workspace:*",
+    "@crez/db": "workspace:*",
+    "@crez/engine": "workspace:*",
+    "@crez/providers": "workspace:*",
+    "@crez/shared": "workspace:*",
+    "@aws-sdk/client-s3": "^3.699.0",
+    "@prisma/client": "^5.22.0",
+    "bullmq": "^5.34.5",
+    "ioredis": "^5.4.2",
+    "zod": "^3.23.8",
+    "@aws-sdk/s3-request-presigner": "^3.699.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.9",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "crez-dice",
+  "private": true,
+  "version": "1.1.0",
+  "description": "CREZ Digital Identity Content Engine",
+  "engines": { "node": ">=20" },
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @crez/db exec prisma generate",
+    "db:migrate": "pnpm --filter @crez/db exec prisma migrate dev",
+    "db:deploy": "pnpm --filter @crez/db exec prisma migrate deploy",
+    "db:seed": "pnpm --filter @crez/db run seed",
+    "contracts:jsonschema": "pnpm --filter @crez/contracts run jsonschema",
+    "licenses:check": "node scripts/license-scan.mjs",
+    "infra:up": "docker compose -f .devcontainer/docker-compose.yml up -d postgres redis minio ml",
+    "infra:down": "docker compose -f .devcontainer/docker-compose.yml down"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.6.3",
+    "@types/node": "^20.17.9",
+    "eslint": "^8.57.1",
+    "prettier": "^3.4.2",
+    "vitest": "^2.1.8",
+    "tsx": "^4.19.2"
+  }
+}

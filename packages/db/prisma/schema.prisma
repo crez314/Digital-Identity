@@ -1,0 +1,503 @@
+// CREZ Digital Identity Content Engine — 데이터 모델 (기술명세서 §4)
+// pgvector 컬럼은 Prisma가 네이티브 지원하지 않으므로 Unsupported 타입으로 선언하고
+// 읽기/쓰기는 raw SQL(packages/db/src/vector.ts)로 처리한다. dim 컬럼을 병행 관리해
+// 모델 교체 시 차원 변경을 추적한다(§7.2).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ── 조직 / 사용자 ──────────────────────────────────────────
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  users      AppUser[]
+  identities Identity[]
+  projects   Project[]
+
+  @@map("organization")
+}
+
+model AppUser {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  email       String   @unique
+  displayName String   @map("display_name")
+  role        String // OWNER|ADMIN|PRODUCER|OPERATOR|VIEWER
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org               Organization  @relation(fields: [orgId], references: [id])
+  projectsCreated   Project[]
+  mappingsConfirmed CastMapping[]
+
+  @@map("app_user")
+}
+
+// ── Digital Identity ──────────────────────────────────────
+model Identity {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  code        String // 'CRZ-A001'
+  displayName String   @map("display_name")
+  legalName   String?  @map("legal_name") // 애플리케이션 레벨 암호화 (§4.2)
+  status      String   @default("DRAFT") // DRAFT|ACTIVE|SUSPENDED|ARCHIVED
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org        Organization      @relation(fields: [orgId], references: [id])
+  assets     IdentityAsset[]
+  embeddings IdentityEmbedding[]
+  profiles   IdentityProfile[]
+  rights     IdentityRights[]
+  casts      ProjectCast[]
+  findings   QcFinding[]
+
+  @@unique([orgId, code])
+  @@map("identity")
+}
+
+model IdentityAsset {
+  id           String   @id @default(uuid()) @db.Uuid
+  identityId   String   @map("identity_id") @db.Uuid
+  assetType    String   @map("asset_type") // FACE_IMAGE|BODY_IMAGE|VIDEO|MOTION_VIDEO
+  captureSlot  String?  @map("capture_slot")
+  expression   String?
+  storageKey   String   @map("storage_key")
+  checksum     String
+  width        Int?
+  height       Int?
+  durationMs   Int?     @map("duration_ms")
+  fps          Decimal? @db.Decimal(6, 3)
+  qualityScore Decimal? @map("quality_score") @db.Decimal(5, 4)
+  isUsable     Boolean  @default(true) @map("is_usable")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  identity   Identity            @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  embeddings IdentityEmbedding[]
+
+  @@index([identityId, assetType])
+  @@map("identity_asset")
+}
+
+model IdentityEmbedding {
+  id           String   @id @default(uuid()) @db.Uuid
+  identityId   String   @map("identity_id") @db.Uuid
+  assetId      String?  @map("asset_id") @db.Uuid
+  kind         String // FACE|BODY
+  modelName    String   @map("model_name")
+  modelVersion String   @map("model_version")
+  dim          Int
+  vector       Unsupported("vector(512)")
+  quality      Decimal? @db.Decimal(5, 4)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  identity Identity       @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  asset    IdentityAsset? @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([identityId, kind])
+  @@map("identity_embedding")
+}
+
+model IdentityProfile {
+  id           String    @id @default(uuid()) @db.Uuid
+  identityId   String    @map("identity_id") @db.Uuid
+  version      Int
+  status       String // BUILDING|ACTIVE|ARCHIVED|FAILED
+  faceCentroid Unsupported("vector(512)")? @map("face_centroid")
+  bodyCentroid Unsupported("vector(256)")? @map("body_centroid")
+  faceVariance Decimal?  @map("face_variance") @db.Decimal(6, 5)
+  attributes   Json      @default("{}")
+  modelBundle  Json      @default("{}") @map("model_bundle")
+  builtAt      DateTime? @map("built_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  identity Identity      @relation(fields: [identityId], references: [id], onDelete: Cascade)
+  casts    ProjectCast[]
+
+  @@unique([identityId, version])
+  @@map("identity_profile")
+}
+
+// ── 권리 / Consent (§14) ──────────────────────────────────
+model IdentityRights {
+  id                 String    @id @default(uuid()) @db.Uuid
+  identityId         String    @map("identity_id") @db.Uuid
+  ownerName          String    @map("owner_name")
+  contractRef        String?   @map("contract_ref")
+  consentStatus      String    @map("consent_status") // PENDING|GRANTED|REVOKED|EXPIRED
+  allowedUsage       String[]  @default([]) @map("allowed_usage")
+  restrictedUsage    String[]  @default([]) @map("restricted_usage")
+  territories        String[]  @default([])
+  commercialUse      Boolean   @default(false) @map("commercial_use")
+  trainingPermitted  Boolean   @default(false) @map("training_permitted")
+  syntheticPermitted Boolean   @default(false) @map("synthetic_permitted")
+  startsAt           DateTime  @map("starts_at") @db.Timestamptz(6)
+  expiresAt          DateTime? @map("expires_at") @db.Timestamptz(6)
+  documentKey        String?   @map("document_key")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  identity Identity @relation(fields: [identityId], references: [id], onDelete: Cascade)
+
+  @@index([identityId, createdAt])
+  @@map("identity_rights")
+}
+
+/// 권리 게이트 3지점(캐스팅·생성·배포) 검사 결과 스냅샷 (§14.1)
+model RightsCheck {
+  id         String   @id @default(uuid()) @db.Uuid
+  orgId      String   @map("org_id") @db.Uuid
+  gate       String // CASTING|GENERATION|DISTRIBUTION
+  usageType  String   @map("usage_type")
+  territory  String?
+  allowed    Boolean
+  results    Json // 인물별 허용/거부와 사유
+  checkedAt  DateTime @default(now()) @map("checked_at") @db.Timestamptz(6)
+
+  casts ProjectCast[]
+
+  @@map("rights_check")
+}
+
+// ── 프로젝트 / 캐스팅 ─────────────────────────────────────
+model Project {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String   @map("org_id") @db.Uuid
+  title       String
+  projectType String   @map("project_type") // MV|CONCERT|AD|SHORTS
+  status      String // DRAFT|READY|RUNNING|REVIEW|COMPLETED|FAILED|ARCHIVED
+  config      Json     @default("{}")
+  createdBy   String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  org          Organization  @relation(fields: [orgId], references: [id])
+  creator      AppUser       @relation(fields: [createdBy], references: [id])
+  cast         ProjectCast[]
+  sourceVideos SourceVideo[]
+  mappings     CastMapping[]
+  scenes       Scene[]
+  segments     Segment[]
+  masters      MasterVideo[]
+
+  @@index([orgId, status])
+  @@map("project")
+}
+
+model ProjectCast {
+  id            String  @id @default(uuid()) @db.Uuid
+  projectId     String  @map("project_id") @db.Uuid
+  identityId    String  @map("identity_id") @db.Uuid
+  profileId     String  @map("profile_id") @db.Uuid // 버전 고정 (§4.1)
+  slotIndex     Int     @map("slot_index")
+  roleLabel     String? @map("role_label")
+  appearance    Json    @default("{}")
+  rightsCheckId String? @map("rights_check_id") @db.Uuid
+
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  identity    Identity        @relation(fields: [identityId], references: [id])
+  profile     IdentityProfile @relation(fields: [profileId], references: [id])
+  rightsCheck RightsCheck?    @relation(fields: [rightsCheckId], references: [id])
+  mappings    CastMapping[]
+
+  @@unique([projectId, identityId])
+  @@unique([projectId, slotIndex])
+  @@map("project_cast")
+}
+
+// ── 소스 영상 / 트랙 / 매핑 ───────────────────────────────
+model SourceVideo {
+  id             String   @id @default(uuid()) @db.Uuid
+  projectId      String   @map("project_id") @db.Uuid
+  storageKey     String   @map("storage_key")
+  durationMs     Int      @default(0) @map("duration_ms")
+  fps            Decimal  @default(30) @db.Decimal(6, 3)
+  width          Int      @default(0)
+  height         Int      @default(0)
+  analysisStatus String   @default("PENDING") @map("analysis_status")
+  tracksKey      String?  @map("tracks_key")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tracks  SourceTrack[]
+
+  @@map("source_video")
+}
+
+model SourceTrack {
+  id            String   @id @default(uuid()) @db.Uuid
+  sourceVideoId String   @map("source_video_id") @db.Uuid
+  trackIndex    Int      @map("track_index")
+  startMs       Int      @map("start_ms")
+  endMs         Int      @map("end_ms")
+  timelineKey   String   @map("timeline_key") // bbox/keypoint 시계열 (S3 parquet)
+  faceCentroid  Unsupported("vector(512)")? @map("face_centroid")
+  quality       Decimal? @db.Decimal(5, 4)
+
+  sourceVideo SourceVideo   @relation(fields: [sourceVideoId], references: [id], onDelete: Cascade)
+  mappings    CastMapping[]
+
+  @@unique([sourceVideoId, trackIndex])
+  @@map("source_track")
+}
+
+model CastMapping {
+  id            String   @id @default(uuid()) @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  sourceTrackId String   @map("source_track_id") @db.Uuid
+  projectCastId String   @map("project_cast_id") @db.Uuid
+  method        String // AUTO|MANUAL|CORRECTED
+  confidence    Decimal? @db.Decimal(5, 4)
+  confirmedBy   String?  @map("confirmed_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project     Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  sourceTrack SourceTrack @relation(fields: [sourceTrackId], references: [id])
+  projectCast ProjectCast @relation(fields: [projectCastId], references: [id])
+  confirmer   AppUser?    @relation(fields: [confirmedBy], references: [id])
+
+  @@unique([projectId, sourceTrackId])
+  @@map("cast_mapping")
+}
+
+// ── 씬 / 세그먼트 / 생성 ──────────────────────────────────
+model Scene {
+  id         String @id @default(uuid()) @db.Uuid
+  projectId  String @map("project_id") @db.Uuid
+  sceneIndex Int    @map("scene_index")
+  startMs    Int    @map("start_ms")
+  endMs      Int    @map("end_ms")
+  prompt     String?
+  style      Json?
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  segments Segment[]
+
+  @@unique([projectId, sceneIndex])
+  @@map("scene")
+}
+
+model Segment {
+  id               String  @id @default(uuid()) @db.Uuid
+  projectId        String  @map("project_id") @db.Uuid
+  sceneId          String? @map("scene_id") @db.Uuid
+  segmentIndex     Int     @map("segment_index")
+  startMs          Int     @map("start_ms")
+  endMs            Int     @map("end_ms")
+  status           String // PENDING|GENERATING|QC|PASSED|FAILED|MANUAL_REVIEW
+  acceptedOutputId String? @map("accepted_output_id") @db.Uuid
+  attemptCount     Int     @default(0) @map("attempt_count")
+  /// 운영자 수동 승인 사유 (§14.2 감사 대상)
+  acceptReason     String? @map("accept_reason")
+  acceptedBy       String? @map("accepted_by") @db.Uuid
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  project     Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scene       Scene?              @relation(fields: [sceneId], references: [id])
+  jobs        GenerationJob[]
+  regenTasks  RegenerationTask[]
+
+  @@unique([projectId, segmentIndex])
+  @@index([projectId, status])
+  @@map("segment")
+}
+
+model AiModel {
+  id            String   @id @default(uuid()) @db.Uuid
+  code          String   @unique
+  provider      String // EXTERNAL_API|SELF_HOSTED
+  endpoint      String?
+  capabilities  Json // max_duration/max_persons/modes/resolution
+  costPerSecond Decimal? @map("cost_per_second") @db.Decimal(10, 4)
+  status        String   @default("ACTIVE")
+  /// 과거 QC 결과에서 역산한 실측 지표 (§12) — 롤링 윈도우로 갱신
+  metrics       Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  jobs GenerationJob[]
+
+  @@map("ai_model")
+}
+
+model GenerationJob {
+  id            String    @id @default(uuid()) @db.Uuid
+  segmentId     String    @map("segment_id") @db.Uuid
+  attempt       Int
+  modelId       String    @map("model_id") @db.Uuid
+  routingTrace  Json      @map("routing_trace") // 왜 이 모델이 선택됐는지 (감사용)
+  params        Json // prompt/seed/conditioning/reference set
+  seed          BigInt?
+  status        String // QUEUED|SUBMITTED|RUNNING|SUCCEEDED|FAILED|CANCELLED
+  providerJobId String?   @map("provider_job_id")
+  costAmount    Decimal?  @map("cost_amount") @db.Decimal(12, 4)
+  startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  finishedAt    DateTime? @map("finished_at") @db.Timestamptz(6)
+  errorCode     String?   @map("error_code")
+  errorDetail   Json?     @map("error_detail")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  segment    Segment            @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  model      AiModel            @relation(fields: [modelId], references: [id])
+  outputs    GenerationOutput[]
+  regenTasks RegenerationTask[]
+
+  @@unique([segmentId, attempt])
+  @@index([status, createdAt]) // SUBMITTED 스캔 reconciler (§8)
+  @@map("generation_job")
+}
+
+model GenerationOutput {
+  id         String   @id @default(uuid()) @db.Uuid
+  jobId      String   @map("job_id") @db.Uuid
+  storageKey String   @map("storage_key")
+  durationMs Int?     @map("duration_ms")
+  fps        Decimal? @db.Decimal(6, 3)
+  width      Int?
+  height     Int?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  job    GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  qcRuns QcRun[]
+
+  @@map("generation_output")
+}
+
+// ── QC / 오류 / 재생성 ────────────────────────────────────
+model QcRun {
+  id             String   @id @default(uuid()) @db.Uuid
+  outputId       String   @map("output_id") @db.Uuid
+  rulesetVersion String   @map("ruleset_version")
+  status         String // RUNNING|PASSED|FAILED|ERROR
+  overallScore   Decimal? @map("overall_score") @db.Decimal(6, 3)
+  perIdentity    Json?    @map("per_identity")
+  /// 원시 시계열은 크므로 S3에 저장하고 키만 보관
+  seriesKey      String?  @map("series_key")
+  modelBundle    Json     @default("{}") @map("model_bundle")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  output     GenerationOutput   @relation(fields: [outputId], references: [id], onDelete: Cascade)
+  findings   QcFinding[]
+  regenTasks RegenerationTask[]
+
+  @@index([outputId, createdAt])
+  @@map("qc_run")
+}
+
+model QcFinding {
+  id          String   @id @default(uuid()) @db.Uuid
+  qcRunId     String   @map("qc_run_id") @db.Uuid
+  identityId  String?  @map("identity_id") @db.Uuid
+  findingType String   @map("finding_type")
+  severity    String // LOW|MEDIUM|HIGH|CRITICAL
+  startMs     Int      @map("start_ms")
+  endMs       Int      @map("end_ms")
+  confidence  Decimal  @db.Decimal(5, 4)
+  evidence    Json // 프레임 인덱스, 유사도 시계열, 썸네일 키
+
+  qcRun    QcRun     @relation(fields: [qcRunId], references: [id], onDelete: Cascade)
+  identity Identity? @relation(fields: [identityId], references: [id])
+
+  @@index([qcRunId, findingType])
+  @@map("qc_finding")
+}
+
+model RegenerationTask {
+  id            String   @id @default(uuid()) @db.Uuid
+  segmentId     String   @map("segment_id") @db.Uuid
+  sourceQcRunId String   @map("source_qc_run_id") @db.Uuid
+  strategy      Json // 적용한 강화 전략 (§11)
+  resultJobId   String?  @map("result_job_id") @db.Uuid
+  outcome       String? // IMPROVED|NO_CHANGE|WORSE|ESCALATED
+  scoreBefore   Decimal? @map("score_before") @db.Decimal(6, 3)
+  scoreAfter    Decimal? @map("score_after") @db.Decimal(6, 3)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  segment   Segment        @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  sourceQc  QcRun          @relation(fields: [sourceQcRunId], references: [id])
+  resultJob GenerationJob? @relation(fields: [resultJobId], references: [id])
+
+  @@index([segmentId, createdAt])
+  @@map("regeneration_task")
+}
+
+/// §10 점수 가중치·임계값 외부화. 코드에 하드코딩 금지, qc_run.ruleset_version에 기록.
+model QcRuleset {
+  version    String   @id
+  weights    Json
+  thresholds Json
+  isActive   Boolean  @default(false) @map("is_active")
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("qc_ruleset")
+}
+
+/// §12 Model Router 2단계 가중 점수의 가중치
+model RoutingRuleset {
+  version   String   @id
+  weights   Json // identity/motion/quality/speed/cost
+  isActive  Boolean  @default(false) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("routing_ruleset")
+}
+
+// ── 마스터 / 파생물 ───────────────────────────────────────
+model MasterVideo {
+  id         String   @id @default(uuid()) @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  version    Int
+  storageKey String   @map("storage_key")
+  durationMs Int      @default(0) @map("duration_ms")
+  /// 결합 작업이 끝나야 storage_key에 실체가 생긴다. 파생물·배포는 COMPLETED에서만 허용한다.
+  status     String   @default("PENDING") // PENDING|BUILDING|COMPLETED|FAILED
+  provenance Json // 세그먼트/job/profile 버전 전체 이력 (§14.3)
+  /// consent REVOKED 시 배포 차단 플래그 (§14.1)
+  restricted Boolean  @default(false)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  derivatives Derivative[]
+
+  @@unique([projectId, version])
+  @@map("master_video")
+}
+
+model Derivative {
+  id          String   @id @default(uuid()) @db.Uuid
+  masterId    String   @map("master_id") @db.Uuid
+  kind        String // SHORTS|REELS|TIKTOK|TEASER|THUMBNAIL|GIF
+  aspectRatio String   @map("aspect_ratio")
+  storageKey  String   @map("storage_key")
+  metadata    Json?
+  status      String   @default("PENDING")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  master MasterVideo @relation(fields: [masterId], references: [id], onDelete: Cascade)
+
+  @@map("derivative")
+}
+
+// ── 감사 로그 (§14.2) append-only ─────────────────────────
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  orgId      String   @map("org_id") @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String
+  identityId String?  @map("identity_id") @db.Uuid
+  projectId  String?  @map("project_id") @db.Uuid
+  payload    Json
+  traceId    String?  @map("trace_id")
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  @@index([identityId, occurredAt(sort: Desc)])
+  @@index([projectId, occurredAt(sort: Desc)])
+  @@map("audit_log")
+}

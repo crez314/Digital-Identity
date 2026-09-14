@@ -15,6 +15,20 @@ export function parseVectorLiteral(s: string | null): number[] | null {
   return s.replace(/^\[|\]$/g, '').split(',').filter(Boolean).map(Number);
 }
 
+/** §4.2 identity_embedding.vector는 vector(512) 고정이고 실제 차원은 dim 컬럼에 둔다. */
+export const EMBEDDING_STORAGE_DIM = 512;
+
+/**
+ * 저장 차원보다 짧은 벡터는 뒤를 0으로 채운다 — 코사인 유사도는 패딩에 영향받지 않는다.
+ * 얼굴(SFace)은 ML이 이미 채워 보내지만 신체 인코더(256차원)는 그대로 오므로 여기서 맞춘다.
+ */
+export function toStorageVector(v: number[], storageDim = EMBEDDING_STORAGE_DIM): number[] {
+  if (v.length > storageDim) {
+    throw new Error(`임베딩 차원 ${v.length}이 저장 차원 ${storageDim}을 넘습니다`);
+  }
+  return v.length === storageDim ? v : [...v, ...new Array<number>(storageDim - v.length).fill(0)];
+}
+
 export async function insertEmbedding(input: {
   id: string;
   identityId: string;
@@ -32,8 +46,13 @@ export async function insertEmbedding(input: {
     VALUES (
       ${input.id}::uuid, ${input.identityId}::uuid,
       ${input.assetId}::uuid, ${input.kind}, ${input.modelName}, ${input.modelVersion},
-      ${input.dim}, ${toVectorLiteral(input.vector)}::vector, ${input.quality}, now()
+      ${input.dim}, ${toVectorLiteral(toStorageVector(input.vector))}::vector, ${input.quality}, now()
     )`;
+}
+
+/** 자산을 다시 검사할 때 이전 임베딩을 지운다 — 같은 사진이 프로파일에 두 번 집계되지 않게 한다. */
+export async function deleteEmbeddingsForAsset(assetId: string): Promise<void> {
+  await prisma.$executeRaw`DELETE FROM identity_embedding WHERE asset_id = ${assetId}::uuid`;
 }
 
 export async function listEmbeddings(
@@ -41,9 +60,9 @@ export async function listEmbeddings(
   kind: 'FACE' | 'BODY',
 ): Promise<Array<{ id: string; assetId: string | null; vector: number[]; quality: number | null; modelName: string; modelVersion: string }>> {
   const rows = await prisma.$queryRaw<
-    Array<{ id: string; asset_id: string | null; vector: string; quality: string | null; model_name: string; model_version: string }>
+    Array<{ id: string; asset_id: string | null; vector: string; dim: number; quality: string | null; model_name: string; model_version: string }>
   >`
-    SELECT e.id, e.asset_id, e.vector::text AS vector, e.quality::text AS quality,
+    SELECT e.id, e.asset_id, e.vector::text AS vector, e.dim, e.quality::text AS quality,
            e.model_name, e.model_version
     FROM identity_embedding e
     JOIN identity_asset a ON a.id = e.asset_id
@@ -51,7 +70,8 @@ export async function listEmbeddings(
   return rows.map((r) => ({
     id: r.id,
     assetId: r.asset_id,
-    vector: parseVectorLiteral(r.vector) ?? [],
+    // 저장 패딩을 걷어내 원래 차원으로 돌려준다 — 신체 centroid 컬럼이 vector(256)이다.
+    vector: (parseVectorLiteral(r.vector) ?? []).slice(0, r.dim),
     quality: r.quality === null ? null : Number(r.quality),
     modelName: r.model_name,
     modelVersion: r.model_version,

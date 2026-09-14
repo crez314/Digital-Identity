@@ -1,7 +1,8 @@
 import { CrezError, ErrorCode, logger } from '@crez/shared';
 import type {
-  FetchResult, GenerationProvider, GenerationRequest, ModelDescriptor, PollResult, SubmitResult,
+  FetchResult, GenerationProvider, GenerationRequest, ImagePlan, ModelDescriptor, PollResult, SubmitResult,
 } from '../types';
+import { planImages } from '../image-plan';
 
 /**
  * Higgsfield 생성 API 어댑터.
@@ -139,30 +140,20 @@ export class HiggsfieldProvider implements GenerationProvider {
   }
 
   /**
-   * 캐스트의 레퍼런스 자산을 제출용 URL 목록으로 만든다.
-   * 스펙상 image_urls는 최대 3장이므로, 인물별로 품질 상위 자산을 고르게 배분한다.
+   * 제출할 이미지 배분. reference-to-video는 스펙상 image_urls 최대 3장, image-to-video는 시작 이미지 1장이다.
+   * 인물 얼굴을 먼저 한 장씩 넣고 남는 자리에 배경·의상·헤어 참고 이미지를 넣는다(image-plan.ts).
    */
-  private referenceUrls(req: GenerationRequest, max: number): string[] {
-    const perIdentity = req.cast.map((c) =>
-      c.references
-        .filter((r) => r.signedUrl)
-        .sort((a, b) => (b.quality ?? 0) - (a.quality ?? 0))
-        .map((r) => r.signedUrl as string),
-    );
+  planImages(req: GenerationRequest): ImagePlan {
+    return planImages(req, this.cfg.endpoint.includes('reference-to-video') ? 3 : 1);
+  }
 
-    // 라운드로빈 — 인물이 여럿일 때 한 인물이 슬롯을 독식하지 않게 한다
-    const out: string[] = [];
-    for (let i = 0; out.length < max; i++) {
-      let added = false;
-      for (const list of perIdentity) {
-        if (i < list.length && out.length < max) {
-          out.push(list[i]);
-          added = true;
-        }
-      }
-      if (!added) break;
+  /** 신원 레퍼런스 없이 참고 이미지만으로 제출하면 인물이 보장되지 않으므로 거절한다 */
+  private plannedUrls(req: GenerationRequest, what: string): string[] {
+    const plan = this.planImages(req);
+    if (!plan.images.some((i) => i.role === 'IDENTITY')) {
+      throw new CrezError(ErrorCode.GEN_PROVIDER_ERROR, what, { segmentId: req.segmentId }, 422);
     }
-    return out;
+    return plan.images.map((i) => i.url);
   }
 
   private buildBody(req: GenerationRequest): Record<string, unknown> {
@@ -179,14 +170,7 @@ export class HiggsfieldProvider implements GenerationProvider {
 
     // reference-to-video — Identity conditioning 경로
     if (ep.includes('reference-to-video')) {
-      const urls = this.referenceUrls(req, 3); // 스펙 maxItems=3
-      if (urls.length === 0) {
-        throw new CrezError(
-          ErrorCode.GEN_PROVIDER_ERROR,
-          'reference-to-video에는 레퍼런스 이미지가 최소 1장 필요하다',
-          { segmentId: req.segmentId }, 422,
-        );
-      }
+      const urls = this.plannedUrls(req, 'reference-to-video에는 인물 레퍼런스 이미지가 최소 1장 필요하다'); // 스펙 maxItems=3
       return {
         prompt,
         image_urls: urls,
@@ -197,15 +181,8 @@ export class HiggsfieldProvider implements GenerationProvider {
       };
     }
 
-    // image-to-video — 시작 프레임 1장
-    const [first] = this.referenceUrls(req, 1);
-    if (!first) {
-      throw new CrezError(
-        ErrorCode.GEN_PROVIDER_ERROR,
-        'image-to-video에는 시작 이미지가 필요하다',
-        { segmentId: req.segmentId }, 422,
-      );
-    }
+    // image-to-video — 시작 프레임 1장. 참고 이미지를 받을 자리가 없어 전부 dropped로 기록된다
+    const [first] = this.plannedUrls(req, 'image-to-video에는 인물 시작 이미지가 필요하다');
     const body: Record<string, unknown> = { prompt, image_url: first };
     if (ep.startsWith('/veo3.1')) {
       body.duration = String(duration);

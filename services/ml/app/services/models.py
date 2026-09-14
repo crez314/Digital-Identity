@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,11 @@ import numpy as np
 from ..config import settings
 
 log = logging.getLogger(__name__)
+
+# OpenCV DNN 객체(FaceDetectorYN·FaceRecognizerSF)는 스레드 안전하지 않다. FastAPI는 동기 엔드포인트를
+# 스레드풀에서 동시에 실행하므로, 공유 인스턴스에 setInputSize/detect가 겹치면 프로세스가 SIGSEGV로 죽는다.
+# 이 모델들을 호출하는 곳은 모두 이 잠금 안에서 실행한다(중첩 호출이 있어 재진입 가능해야 한다).
+OPENCV_LOCK = threading.RLock()
 
 # opencv_zoo 배포 파일명. scripts/download_models.sh가 내려받는다.
 YUNET_FILE = "face_detection_yunet_2023mar.onnx"

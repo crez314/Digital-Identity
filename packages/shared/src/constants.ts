@@ -41,6 +41,25 @@ export const QUEUE_POLICY: Record<QueueName, { concurrency: number; attempts: nu
 export const REQUIRED_FACE_SLOTS = ['FRONT', 'LEFT_45', 'RIGHT_45', 'LEFT_90', 'RIGHT_90'] as const;
 export const REQUIRED_BODY_SLOTS = ['BODY_FRONT'] as const;
 
+/**
+ * 자산 품질검사 판정 기준 (§17 CREZ-IDN-002). 워커가 판정하고, api는 재검사 대상을 고를 때 쓴다.
+ * 판정 당시 값은 identity_asset.quality_detail에 함께 남는다.
+ */
+export const ASSET_QUALITY_POLICY = {
+  /** 품질 점수 하한 */
+  minQuality: 0.4,
+  /**
+   * 얼굴 슬롯: 얼굴 높이가 화면 세로의 이 비율보다 작으면 전신·반신 사진으로 본다.
+   * 실측(2026-09-11, 휴대폰 세로 사진, 긴 변 640px 검출) — 얼굴 사진 34~53%, 전신 사진 9.7~11.5%.
+   */
+  minFaceHeightRatio: 0.15,
+  /**
+   * 신체 슬롯: 얼굴 기준으로 추정한 전신 높이 중 이 비율 이상이 화면에 있어야 전신 사진으로 본다.
+   * 실측 — 전신 사진 1.00, 얼굴 사진 0.26~0.41.
+   */
+  minBodyInFrame: 0.85,
+} as const;
+
 /** 임베딩 차원 (§4.2) */
 export const FACE_EMBEDDING_DIM = 512;
 export const BODY_EMBEDDING_DIM = 256;
@@ -59,6 +78,8 @@ export const storageKey = {
     `projects/${projectId}/source/${sourceVideoId}/tracks.parquet`,
   segmentOutput: (projectId: string, segmentId: string, attempt: number) =>
     `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/output.mp4`,
+  segmentReference: (projectId: string, segmentId: string, referenceId: string, ext: string) =>
+    `projects/${projectId}/segments/${segmentId}/references/${referenceId}.${ext}`,
   qcFrame: (projectId: string, segmentId: string, attempt: number, ms: number) =>
     `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/qc/frames/${ms}.jpg`,
   master: (projectId: string, version: number) => `projects/${projectId}/masters/${version}/master.mp4`,

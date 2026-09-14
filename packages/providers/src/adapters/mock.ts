@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type {
-  FetchResult, GenerationProvider, GenerationRequest, ModelDescriptor, PollResult, SubmitResult,
+  FetchResult, GenerationProvider, GenerationRequest, ImagePlan, ModelDescriptor, PollResult, SubmitResult,
 } from '../types';
+import { planImages } from '../image-plan';
 
 /**
  * 개발/테스트용 어댑터 (§18).
@@ -29,6 +30,11 @@ function shouldFail(req: GenerationRequest): boolean {
 
 export class MockProvider implements GenerationProvider {
   readonly code = 'mock';
+
+  /** 실제로 이미지를 쓰지 않지만, 생성 기록이 실연동과 같은 형태가 되도록 전부 받은 것으로 기록한다 */
+  planImages(req: GenerationRequest): ImagePlan {
+    return planImages(req, Number.POSITIVE_INFINITY);
+  }
 
   async submit(req: GenerationRequest): Promise<SubmitResult> {
     const providerJobId = `mock_${req.segmentId}_${req.attempt}`;

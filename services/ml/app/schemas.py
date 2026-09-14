@@ -40,6 +40,10 @@ class FaceEmbeddingResult(BaseModel):
     bbox: BBox | None = None
     landmarks: list[tuple[float, float]] | None = None
     frontality: float | None = None
+    imageWidth: int | None = None
+    imageHeight: int | None = None
+    detectionScore: float | None = None
+    faceCount: int | None = None
 
 
 class EmbedFaceResponse(BaseModel):
@@ -61,6 +65,10 @@ class BodyEmbeddingResult(BaseModel):
     dim: int | None = None
     bodyRatios: dict[str, float] | None = None
     quality: float | None = None
+    imageWidth: int | None = None
+    imageHeight: int | None = None
+    faceBbox: BBox | None = None
+    bodyInFrameRatio: float | None = None
 
 
 class EmbedBodyResponse(BaseModel):

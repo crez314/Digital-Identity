@@ -118,8 +118,10 @@ def analyze(
                 x, y, w, h = [float(v) for v in row[:4]]
                 landmarks = np.array(row[4:14], dtype=np.float32).reshape(5, 2)
                 try:
-                    aligned = recognizer.alignCrop(frame, row)
-                    feature = models.pad_to_storage_dim(recognizer.feature(aligned))
+                    with models.OPENCV_LOCK:
+                        aligned = recognizer.alignCrop(frame, row)
+                        raw_feature = recognizer.feature(aligned)
+                    feature = models.pad_to_storage_dim(raw_feature)
                 except Exception:  # noqa: BLE001 — 정렬 실패 프레임은 벡터 없이 트랙 연속성만 유지
                     feature = None
 

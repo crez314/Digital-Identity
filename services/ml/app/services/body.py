@@ -58,6 +58,10 @@ def embed_keys(keys: list[str], derive_from_face: bool = True) -> list[dict]:
                     "legTorsoRatio": seeded_float(f"ltr:{k}", 1.0, 1.3),
                 },
                 "quality": seeded_float(f"bq:{k}", 0.55, 0.95),
+                # 얼굴이 화면 세로의 약 9%인 전신 사진으로 가정한다
+                "imageWidth": 600, "imageHeight": 1600,
+                "faceBbox": {"x": 260.0, "y": 60.0, "w": 80.0, "h": 140.0},
+                "bodyInFrameRatio": 1.0,
             }
             for k in keys
         ]
@@ -75,16 +79,21 @@ def embed_keys(keys: list[str], derive_from_face: bool = True) -> list[dict]:
 
             crop_img = image
             derived = False
+            fh, fw = image.shape[:2]
+            face_bbox = None
+            in_frame = None
             if derive_from_face:
+                from .body_region import body_in_frame_ratio, person_region
                 from .body_region import crop as crop_region
-                from .body_region import person_region
-                from .face import detect_faces
+                from .face import ASSET_DETECT_MAX_SIDE, detect_faces
 
-                faces = detect_faces(image)
+                faces = detect_faces(image, max_side=ASSET_DETECT_MAX_SIDE)
                 if faces:
                     row, _ = max(faces, key=lambda f: f[0][2] * f[0][3])
                     x, y, w, h = (float(v) for v in row[:4])
-                    fh, fw = image.shape[:2]
+                    face_bbox = {"x": x, "y": y, "w": w, "h": h}
+                    # 신체 슬롯에 얼굴·상반신 사진이 들어왔는지 워커가 판정할 수 있게 측정값을 넘긴다
+                    in_frame = body_in_frame_ratio(y, h, fh)
                     sub = crop_region(image, person_region(x, y, w, h, fw, fh))
                     if sub is not None:
                         crop_img = sub
@@ -94,7 +103,9 @@ def embed_keys(keys: list[str], derive_from_face: bool = True) -> list[dict]:
             result = encoder.encode(crop_img)
             if not result.ok or result.vector is None:
                 out.append({"imageKey": key, "ok": False, "error": result.error,
-                            "vector": None, "dim": None, "bodyRatios": None, "quality": None})
+                            "vector": None, "dim": None, "bodyRatios": None, "quality": None,
+                            "imageWidth": fw, "imageHeight": fh, "faceBbox": face_bbox,
+                            "bodyInFrameRatio": in_frame})
                 continue
 
             out.append({
@@ -103,6 +114,9 @@ def embed_keys(keys: list[str], derive_from_face: bool = True) -> list[dict]:
                 "bodyRatios": None,  # 포즈 모델 없이는 산출하지 않는다
                 "quality": result.quality,
                 "derivedFromFace": derived,
+                "imageWidth": fw, "imageHeight": fh,
+                "faceBbox": face_bbox,
+                "bodyInFrameRatio": in_frame,
             })
         except Exception as e:
             log.exception("body embed failed key=%s", key)

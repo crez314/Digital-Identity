@@ -5,12 +5,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { get, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
+import {
+  GenerationSettingsFields, MODE_INFO, defaultModelFor, useModels, type GenerationSettings,
+} from '@/components/generation-settings';
 
 interface ProjectRow {
   id: string;
   title: string;
   projectType: string;
   status: string;
+  config: { requiredMode?: string; preferredModel?: string; resolution?: string };
   createdAt: string;
 }
 
@@ -25,8 +29,14 @@ const STATUS_STYLE: Record<string, string> = {
 
 export default function ProjectsPage() {
   const qc = useQueryClient();
+  const models = useModels();
   const [title, setTitle] = useState('');
   const [type, setType] = useState('MV');
+  // 모델 목록이 오기 전에는 null — 도착하면 인물 레퍼런스 방식의 실제 모델을 기본으로 잡는다
+  const [settings, setSettings] = useState<GenerationSettings | null>(null);
+  const current: GenerationSettings = settings ?? {
+    requiredMode: 'reference', resolution: '1080p', preferredModel: defaultModelFor(models.data, 'reference'),
+  };
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['projects'],
@@ -34,7 +44,16 @@ export default function ProjectsPage() {
   });
 
   const create = useMutation({
-    mutationFn: () => post('/projects', { title, projectType: type }),
+    mutationFn: () =>
+      post('/projects', {
+        title: title.trim(),
+        projectType: type,
+        config: {
+          requiredMode: current.requiredMode,
+          resolution: current.resolution,
+          ...(current.preferredModel ? { preferredModel: current.preferredModel } : {}),
+        },
+      }),
     onSuccess: () => {
       setTitle('');
       qc.invalidateQueries({ queryKey: ['projects'] });
@@ -43,31 +62,49 @@ export default function ProjectsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <h1 className="text-xl font-semibold">프로젝트</h1>
-        <div className="flex gap-2">
-          <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="제목"
-            className="rounded border border-neutral-300 px-3 py-1.5 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-          />
-          <select
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-            className="rounded border border-neutral-300 px-2 py-1.5 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-          >
-            {['MV', 'CONCERT', 'AD', 'SHORTS'].map((t) => (
-              <option key={t}>{t}</option>
-            ))}
-          </select>
-          <Button onClick={() => create.mutate()} disabled={!title || create.isPending}>
-            생성
-          </Button>
-        </div>
-      </div>
+      <h1 className="text-xl font-semibold">프로젝트</h1>
 
-      <ErrorBox error={create.error ?? error} />
+      <Card>
+        <h2 className="font-medium">새 프로젝트</h2>
+        <form
+          className="mt-3 space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (title.trim()) create.mutate();
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-[1fr_10rem]">
+            <label className="text-xs text-neutral-500">
+              제목
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="예: 김지민 MV 테스트"
+                className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+              />
+            </label>
+            <label className="text-xs text-neutral-500">
+              유형
+              <select
+                value={type}
+                onChange={(e) => setType(e.target.value)}
+                className="mt-0.5 block w-full rounded border border-neutral-300 bg-white px-2 py-1.5 text-sm text-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-100"
+              >
+                {['MV', 'CONCERT', 'AD', 'SHORTS'].map((t) => <option key={t}>{t}</option>)}
+              </select>
+            </label>
+          </div>
+          <GenerationSettingsFields value={current} onChange={setSettings} />
+          <ErrorBox error={create.error} />
+          <div className="flex justify-end">
+            <Button type="submit" disabled={!title.trim() || create.isPending}>
+              {create.isPending ? '만드는 중…' : '프로젝트 생성'}
+            </Button>
+          </div>
+        </form>
+      </Card>
+
+      <ErrorBox error={error} />
 
       {isLoading ? (
         <Loading />
@@ -83,7 +120,12 @@ export default function ProjectsPage() {
                   <Badge className={STATUS_STYLE[p.status] ?? ''}>{p.status}</Badge>
                 </div>
                 <div className="mt-2 font-medium">{p.title}</div>
-                <div className="mt-2 text-xs text-neutral-400">{p.createdAt.slice(0, 10)}</div>
+                <div className="mt-2 truncate text-xs text-neutral-500">
+                  {MODE_INFO[p.config?.requiredMode ?? 'pose-guided']?.label ?? p.config?.requiredMode}
+                  {' · '}
+                  {p.config?.preferredModel ?? '자동 선택'}
+                </div>
+                <div className="mt-1 text-xs text-neutral-400">{p.createdAt.slice(0, 10)}</div>
               </Card>
             </Link>
           ))}

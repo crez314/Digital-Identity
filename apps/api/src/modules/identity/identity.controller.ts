@@ -57,6 +57,13 @@ export class IdentityController {
     return this.svc.update(user, id, body as { displayName?: string; status?: string }, traceId);
   }
 
+  @Delete(':id')
+  @RequirePermission('IDENTITY_WRITE')
+  @ApiOperation({ summary: 'Identity 삭제. 사진·프로파일·권리 기록·스토리지 파일까지 지운다. 캐스팅 중이면 거절' })
+  remove(@CurrentUser() user: AuthUser, @Param('id') id: string, @TraceId() traceId: string) {
+    return this.svc.remove(user, id, traceId);
+  }
+
   @Post(':id/assets/upload-url')
   @RequirePermission('IDENTITY_WRITE')
   @ApiOperation({ summary: 'presigned PUT URL 발급 (§15 15분 만료)' })
@@ -80,6 +87,13 @@ export class IdentityController {
     return this.svc.confirmAsset(user, id, body, traceId);
   }
 
+  @Post(':id/assets/recheck')
+  @RequirePermission('IDENTITY_WRITE')
+  @ApiOperation({ summary: '업로드된 이미지를 현재 기준으로 다시 품질검사. 사용자가 뺀 자산은 제외' })
+  recheckAssets(@CurrentUser() user: AuthUser, @Param('id') id: string, @TraceId() traceId: string) {
+    return this.svc.recheckAssets(user, id, traceId);
+  }
+
   @Get(':id/assets')
   @RequirePermission('READ')
   @ApiOperation({ summary: '자산 목록. 캡처 슬롯 충족률 포함' })
@@ -89,14 +103,14 @@ export class IdentityController {
 
   @Delete(':id/assets/:assetId')
   @RequirePermission('IDENTITY_WRITE')
-  @ApiOperation({ summary: '자산 비활성화 (물리 삭제 아님)' })
-  deactivateAsset(
+  @ApiOperation({ summary: '자산 삭제. 프로파일 빌드에 쓰였을 수 있는 자산은 비활성화만 한다' })
+  removeAsset(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
     @Param('assetId') assetId: string,
     @TraceId() traceId: string,
   ) {
-    return this.svc.deactivateAsset(user, id, assetId, traceId);
+    return this.svc.removeAsset(user, id, assetId, traceId);
   }
 
   @Post(':id/profile/build')

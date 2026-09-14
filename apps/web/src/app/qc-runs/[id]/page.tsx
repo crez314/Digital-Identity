@@ -1,7 +1,8 @@
 'use client';
 
+import { useParams } from 'next/navigation';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { use, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { get, post } from '@/lib/api';
 import { Badge, Button, Card, ErrorBox, Loading } from '@/components/ui';
 import { QcTimeline, type Finding } from '@/components/qc-timeline';
@@ -32,8 +33,8 @@ const METRIC_LABELS: Record<string, string> = {
   score: '종합',
 };
 
-export default function QcRunPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+export default function QcRunPage() {
+  const { id } = useParams<{ id: string }>();
   const video = useRef<HTMLVideoElement>(null);
   const [reason, setReason] = useState('');
 

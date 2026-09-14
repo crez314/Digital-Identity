@@ -1,7 +1,8 @@
 import { CrezError, ErrorCode } from '@crez/shared';
 import type {
-  FetchResult, GenerationProvider, GenerationRequest, ModelDescriptor, PollResult, SubmitResult,
+  FetchResult, GenerationProvider, GenerationRequest, ImagePlan, ModelDescriptor, PollResult, SubmitResult,
 } from '../types';
+import { planImages } from '../image-plan';
 
 /**
  * 외부 상용 생성 API 어댑터 (§1 하이브리드, §12).
@@ -23,6 +24,11 @@ export class ExternalHttpProvider implements GenerationProvider {
   readonly code: string;
   constructor(private readonly cfg: ExternalHttpConfig) {
     this.code = cfg.code;
+  }
+
+  /** 스토리지 키로 전부 넘기므로 빠지는 첨부가 없다 */
+  planImages(req: GenerationRequest): ImagePlan {
+    return planImages(req, Number.POSITIVE_INFINITY);
   }
 
   private async call<T>(path: string, init: RequestInit): Promise<T> {
@@ -76,6 +82,8 @@ export class ExternalHttpProvider implements GenerationProvider {
           referenceKeys: c.references.map((r) => r.storageKey),
         })),
       },
+      // 범용 HTTP 제공자는 스토리지 키로 받으므로 이미지 수 제한 없이 모두 넘긴다
+      promptReferences: req.attachments.map((a) => ({ kind: a.kind, slot: a.slotIndex, referenceKey: a.storageKey })),
       sourceVideoKey: req.sourceVideoKey,
       poseTracksKey: req.sourceTracksKey,
       callbackTraceId: req.traceId,

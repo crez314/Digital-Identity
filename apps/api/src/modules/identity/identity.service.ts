@@ -2,8 +2,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@crez/db';
 import { encryptField } from '@crez/db';
+import { Prisma } from '@crez/db';
 import {
-  CrezError, ErrorCode, QUEUE, REQUIRED_BODY_SLOTS, REQUIRED_FACE_SLOTS, storageKey,
+  ASSET_QUALITY_POLICY, CrezError, ErrorCode, QUEUE, REQUIRED_BODY_SLOTS, REQUIRED_FACE_SLOTS, logger, storageKey,
 } from '@crez/shared';
 import type { CaptureSlot, SlotCoverageDto } from '@crez/contracts';
 import { JOB_NAME } from '@crez/contracts';
@@ -12,6 +13,23 @@ import { S3Service } from '../../common/storage/s3.service';
 import { QueueService } from '../../common/queue/queue.service';
 import { AuditService } from '../../common/audit/audit.service';
 import type { AuthUser } from '../../common/auth/auth.types';
+
+/** 품질검사 큐에 넣기 전 상태 — 화면이 '검사 중'으로 보이도록 이전 판정을 비운다. */
+const PENDING_CHECK = {
+  isUsable: true, qualityScore: null, rejectReason: null, qualityDetail: Prisma.DbNull,
+} satisfies Prisma.IdentityAssetUpdateInput;
+
+/**
+ * 워커가 판정한 자산인지 — 사용자가 직접 뺀 자산은 재검사로 되살리지 않는다.
+ * reject_reason 도입 전에 제외된 자산은 사유가 없으므로 점수로 구분한다(자동 제외는 0점 또는 하한 미달).
+ */
+export function isAutoJudged(a: { isUsable: boolean; rejectReason: string | null; qualityScore: unknown }): boolean {
+  if (a.isUsable) return true;
+  if (a.rejectReason === 'DEACTIVATED') return false;
+  if (a.rejectReason) return true;
+  const q = a.qualityScore === null ? null : Number(a.qualityScore);
+  return q !== null && q < ASSET_QUALITY_POLICY.minQuality;
+}
 
 @Injectable()
 export class IdentityService {
@@ -113,6 +131,54 @@ export class IdentityService {
     return this.toDto(id);
   }
 
+  /**
+   * Identity 삭제 — 사진·임베딩·프로파일·권리 기록이 함께 지워진다(FK CASCADE).
+   * 프로젝트에 캐스팅된 인물은 그 프로젝트의 생성 기록이 가리키므로 먼저 캐스팅에서 빼거나 프로젝트를 지워야 한다
+   * (DB도 project_cast FK RESTRICT로 막는다). 감사 로그에 삭제 전 요약을 남긴다(§14.2).
+   */
+  async remove(user: AuthUser, identityId: string, traceId: string) {
+    const identity = await this.prisma.identity.findFirst({ where: { id: identityId, orgId: user.orgId } });
+    if (!identity) throw new CrezError(ErrorCode.IDN_NOT_FOUND, undefined, { identityId }, 404);
+
+    const casts = await this.prisma.projectCast.findMany({
+      where: { identityId }, include: { project: { select: { id: true, title: true, status: true } } },
+    });
+    if (casts.length > 0) {
+      const projects = casts.map((c) => c.project);
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        `프로젝트 ${projects.map((p) => `'${p.title}'`).join(', ')}에 캐스팅되어 있어 삭제할 수 없습니다 — 캐스팅에서 빼거나 프로젝트를 먼저 삭제하세요`,
+        { projects }, 409,
+      );
+    }
+    const [profiles, assetCount, rights] = await Promise.all([
+      this.prisma.identityProfile.findMany({ where: { identityId }, select: { version: true, status: true } }),
+      this.prisma.identityAsset.count({ where: { identityId } }),
+      this.prisma.identityRights.findMany({ where: { identityId }, orderBy: { createdAt: 'desc' }, select: { consentStatus: true, createdAt: true } }),
+    ]);
+    if (profiles.some((p) => p.status === 'BUILDING')) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '프로파일 빌드 중에는 삭제할 수 없습니다', null, 409);
+    }
+
+    await this.prisma.identity.delete({ where: { id: identityId } });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'IDENTITY_DELETED', identityId,
+      payload: {
+        code: identity.code, displayName: identity.displayName, status: identity.status,
+        assetCount, profiles, rightsRecords: rights.length, latestConsent: rights[0]?.consentStatus ?? null,
+      },
+      traceId,
+    });
+
+    let deletedObjects = 0;
+    try {
+      deletedObjects = await this.s3.deletePrefix(`identities/${identityId}/`);
+    } catch (e) {
+      logger.warn({ traceId, identityId, err: String(e) }, 'identity storage cleanup failed');
+    }
+    return { ok: true, deletedObjects };
+  }
+
   /** presigned PUT URL 발급 (§6.1, §15) */
   async createUploadUrl(user: AuthUser, identityId: string, input: {
     assetType: string; captureSlot?: string; expression?: string; contentType: string; fileName: string;
@@ -148,7 +214,7 @@ export class IdentityService {
 
     await this.prisma.identityAsset.update({
       where: { id: asset.id },
-      data: { checksum: input.checksum, isUsable: true },
+      data: { checksum: input.checksum, ...PENDING_CHECK },
     });
 
     const jobId = await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
@@ -169,12 +235,19 @@ export class IdentityService {
       orderBy: { createdAt: 'desc' },
     });
     return {
-      assets: assets.map((a) => ({
+      assets: await Promise.all(assets.map(async (a) => ({
         id: a.id, assetType: a.assetType, captureSlot: a.captureSlot, expression: a.expression,
         storageKey: a.storageKey, width: a.width, height: a.height, durationMs: a.durationMs,
-        qualityScore: a.qualityScore ? Number(a.qualityScore) : null,
+        qualityScore: a.qualityScore !== null ? Number(a.qualityScore) : null,
         isUsable: a.isUsable, createdAt: a.createdAt.toISOString(),
-      })),
+        rejectReason: a.rejectReason,
+        qualityDetail: (a.qualityDetail as Record<string, unknown> | null) ?? null,
+        // checksum이 'pending'이면 업로드 URL만 발급되고 객체는 아직 없다.
+        previewUrl:
+          a.checksum !== 'pending' && (a.assetType === 'FACE_IMAGE' || a.assetType === 'BODY_IMAGE')
+            ? (await this.s3.presignGet(a.storageKey)).url
+            : null,
+      }))),
       coverage: this.coverage(assets.filter((a) => a.isUsable).map((a) => a.captureSlot)),
     };
   }
@@ -193,18 +266,86 @@ export class IdentityService {
     };
   }
 
-  /** 물리 삭제가 아닌 비활성화 (§6.1) — 감사 추적성 유지 */
-  async deactivateAsset(user: AuthUser, identityId: string, assetId: string, traceId: string) {
+  /**
+   * 자산 삭제 (§6.1).
+   * 프로파일 빌드에 쓰였을 수 있는 자산은 재현성(§4.1)을 위해 지우지 않고 비활성화만 한다.
+   * 빌드에 한 번도 들어가지 않은 자산(잘못 올린 사진 등)은 DB 행·임베딩·스토리지 객체를 실제로 지우고,
+   * 무엇을 지웠는지는 감사 로그에 남긴다(§14.2).
+   */
+  async removeAsset(user: AuthUser, identityId: string, assetId: string, traceId: string) {
     const asset = await this.prisma.identityAsset.findFirst({
       where: { id: assetId, identityId, identity: { orgId: user.orgId } },
     });
     if (!asset) throw new CrezError(ErrorCode.IDN_NOT_FOUND, '자산을 찾을 수 없음', { assetId }, 404);
-    await this.prisma.identityAsset.update({ where: { id: assetId }, data: { isUsable: false } });
-    await this.audit.record({
-      orgId: user.orgId, actorId: user.id, action: 'ASSET_DEACTIVATED',
-      identityId, payload: { assetId }, traceId,
+
+    // 빌드는 그 시점의 임베딩을 모두 집계하므로, 자산보다 나중에 시작된 빌드가 있으면 쓰였다고 본다.
+    const usedByProfile = await this.prisma.identityProfile.count({
+      where: { identityId, status: { in: ['BUILDING', 'ACTIVE', 'ARCHIVED'] }, createdAt: { gt: asset.createdAt } },
     });
-    return { ok: true };
+
+    if (usedByProfile > 0) {
+      // 사유를 남겨 두어야 재검사가 사용자가 뺀 자산을 되살리지 않는다.
+      await this.prisma.identityAsset.update({
+        where: { id: assetId }, data: { isUsable: false, rejectReason: 'DEACTIVATED' },
+      });
+      await this.audit.record({
+        orgId: user.orgId, actorId: user.id, action: 'ASSET_DEACTIVATED',
+        identityId, payload: { assetId, reason: 'USED_BY_PROFILE' }, traceId,
+      });
+      return { ok: true, mode: 'DEACTIVATED' as const };
+    }
+
+    // identity_embedding은 FK ON DELETE CASCADE로 함께 지워진다.
+    await this.prisma.identityAsset.delete({ where: { id: assetId } });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'ASSET_DELETED', identityId,
+      payload: {
+        assetId, assetType: asset.assetType, captureSlot: asset.captureSlot,
+        checksum: asset.checksum, storageKey: asset.storageKey,
+      },
+      traceId,
+    });
+    // 스토리지 정리는 DB 삭제 뒤에 한다. 실패해도 참조가 없는 객체만 남으므로 요청은 성공으로 둔다.
+    try {
+      await this.s3.delete(asset.storageKey);
+    } catch (e) {
+      logger.warn({ traceId, assetId, storageKey: asset.storageKey, err: String(e) }, 'asset object delete failed');
+    }
+    return { ok: true, mode: 'DELETED' as const };
+  }
+
+  /**
+   * 업로드된 이미지 자산을 현재 기준(ASSET_QUALITY_POLICY)으로 다시 검사한다.
+   * 판정 기준이 바뀌었거나 ML 오류로 실패한 자산을 다시 올리지 않고 복구하기 위한 경로다.
+   * 사용자가 직접 뺀 자산은 되살리지 않는다.
+   */
+  async recheckAssets(user: AuthUser, identityId: string, traceId: string) {
+    const identity = await this.prisma.identity.findFirst({ where: { id: identityId, orgId: user.orgId } });
+    if (!identity) throw new CrezError(ErrorCode.IDN_NOT_FOUND, undefined, { identityId }, 404);
+
+    // 빌드는 검사 시점의 사용 가능 자산을 읽으므로, 빌드 중에 판정을 뒤집으면 결과가 섞인다.
+    const building = await this.prisma.identityProfile.count({ where: { identityId, status: 'BUILDING' } });
+    if (building > 0) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '프로파일 빌드 중에는 재검사할 수 없습니다', null, 409);
+    }
+
+    const assets = await this.prisma.identityAsset.findMany({
+      where: { identityId, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE'] }, checksum: { not: 'pending' } },
+    });
+    const targets = assets.filter((a) => isAutoJudged(a));
+
+    for (const a of targets) {
+      await this.prisma.identityAsset.update({ where: { id: a.id }, data: PENDING_CHECK });
+      await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
+        traceId, orgId: user.orgId, identityId, assetId: a.id,
+      });
+    }
+
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'ASSET_RECHECKED', identityId,
+      payload: { assetIds: targets.map((a) => a.id), policy: ASSET_QUALITY_POLICY }, traceId,
+    });
+    return { queued: targets.length, skipped: assets.length - targets.length, traceId };
   }
 
   /** 프로파일 신규 버전 빌드 요청 → jobId 반환 (§6.1) */

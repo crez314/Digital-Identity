@@ -1,9 +1,10 @@
-import { Body, Controller, Get, Param, Post, Put, Query, Sse } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Sse } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { interval, map, merge, type Observable } from 'rxjs';
 import {
-  ConfirmMappingsRequest, CreateProjectRequest, GenerateRequest,
-  SetCastRequest, SetScenesRequest, SourceVideoUploadUrlRequest,
+  ConfirmMappingsRequest, CreateProjectRequest, GenerateRequest, PromptReferenceConfirmRequest,
+  PromptReferenceUploadRequest, SetCastRequest, SetScenesRequest, SourceVideoUploadUrlRequest,
+  UpdateProjectRequest, UpdateSegmentRequest,
 } from '@crez/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { CurrentUser, TraceId } from '../../common/auth/current-user.decorator';
@@ -45,6 +46,24 @@ export class ProjectController {
   @RequirePermission('READ')
   get(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.svc.toDto(id, user);
+  }
+
+  @Patch(':id')
+  @RequirePermission('PROJECT_CREATE')
+  @ApiOperation({ summary: '제목·생성 설정(방식·해상도·지정 모델) 변경. 생성 설정은 DRAFT·READY에서만' })
+  update(
+    @CurrentUser() user: AuthUser, @Param('id') id: string,
+    @Body(new ZodValidationPipe(UpdateProjectRequest)) body: UpdateProjectRequest,
+    @TraceId() traceId: string,
+  ) {
+    return this.svc.update(user, id, body, traceId);
+  }
+
+  @Delete(':id')
+  @RequirePermission('PROJECT_CREATE')
+  @ApiOperation({ summary: '프로젝트 삭제. 생성 기록·결과·스토리지 파일까지 지운다. 생성 중이면 거절' })
+  remove(@CurrentUser() user: AuthUser, @Param('id') id: string, @TraceId() traceId: string) {
+    return this.svc.remove(user, id, traceId);
   }
 
   @Get(':id/dashboard')
@@ -133,6 +152,49 @@ export class ProjectController {
   @RequirePermission('READ')
   segments(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.svc.listSegments(user, id);
+  }
+
+  @Patch(':id/segments/:segmentId')
+  @RequirePermission('PROJECT_RUN')
+  @ApiOperation({ summary: '세그먼트 프롬프트 수정. 비우면 씬 프롬프트를 쓴다. 다음 생성부터 반영' })
+  updateSegment(
+    @CurrentUser() user: AuthUser, @Param('id') id: string, @Param('segmentId') segmentId: string,
+    @Body(new ZodValidationPipe(UpdateSegmentRequest)) body: UpdateSegmentRequest,
+    @TraceId() traceId: string,
+  ) {
+    return this.svc.updateSegmentPrompt(user, id, segmentId, body, traceId);
+  }
+
+  @Post(':id/segments/:segmentId/references/upload-url')
+  @RequirePermission('PROJECT_RUN')
+  @ApiOperation({ summary: '프롬프트 참고 이미지(배경·의상·헤어) 업로드 URL 발급' })
+  referenceUploadUrl(
+    @CurrentUser() user: AuthUser, @Param('id') id: string, @Param('segmentId') segmentId: string,
+    @Body(new ZodValidationPipe(PromptReferenceUploadRequest)) body: PromptReferenceUploadRequest,
+  ) {
+    return this.svc.createReferenceUploadUrl(user, id, segmentId, body);
+  }
+
+  @Post(':id/segments/:segmentId/references/:referenceId/confirm')
+  @RequirePermission('PROJECT_RUN')
+  @ApiOperation({ summary: '참고 이미지 업로드 확정. 다음 생성부터 모델에 전달' })
+  confirmReference(
+    @CurrentUser() user: AuthUser, @Param('id') id: string, @Param('segmentId') segmentId: string,
+    @Param('referenceId') referenceId: string,
+    @Body(new ZodValidationPipe(PromptReferenceConfirmRequest)) body: PromptReferenceConfirmRequest,
+    @TraceId() traceId: string,
+  ) {
+    return this.svc.confirmReference(user, id, segmentId, referenceId, body, traceId);
+  }
+
+  @Delete(':id/segments/:segmentId/references/:referenceId')
+  @RequirePermission('PROJECT_RUN')
+  @ApiOperation({ summary: '참고 이미지 삭제. 생성에 쓰인 적 있으면 보존하고 이후 생성에서만 뺀다' })
+  removeReference(
+    @CurrentUser() user: AuthUser, @Param('id') id: string, @Param('segmentId') segmentId: string,
+    @Param('referenceId') referenceId: string, @TraceId() traceId: string,
+  ) {
+    return this.svc.removeReference(user, id, segmentId, referenceId, traceId);
   }
 
   @Sse(':id/events')

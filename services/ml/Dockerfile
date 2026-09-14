@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY scripts ./scripts
+# 인코더 레지스트리가 configs/encoders.yaml을 읽는다. 없으면 신체 임베딩이 전부 실패한다.
+COPY configs ./configs
 
 # 모델 가중치는 이미지에 굽지 않고 볼륨으로 주입한다.
 # 라이선스 대장(docs/licenses.md) 관리와 이미지 재빌드 분리를 위해서다.

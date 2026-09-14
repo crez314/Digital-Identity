@@ -10,6 +10,18 @@ export const CaptureSlot = z.enum([
   'BODY_FRONT', 'BODY_LEFT', 'BODY_RIGHT', 'BODY_BACK',
 ]);
 export const Expression = z.enum(['NEUTRAL', 'SMILE', 'SERIOUS', 'SINGING', 'TALKING', 'PERFORMANCE']);
+/** 세그먼트 프롬프트에 붙이는 참고 이미지 종류 */
+export const PromptReferenceKind = z.enum(['BACKGROUND', 'OUTFIT', 'HAIR']);
+/** 자산 품질검사 제외 사유 (§17 CREZ-IDN-002의 세부) */
+export const AssetRejectReason = z.enum([
+  'NO_FACE',            // 얼굴 슬롯에서 얼굴 미검출
+  'PROCESSING_FAILED',  // 디코딩·인코더 오류
+  'LOW_QUALITY',        // 품질 점수 미달
+  'FACE_TOO_SMALL',     // 얼굴 슬롯인데 얼굴이 작다 — 전신·반신 사진
+  'NOT_FULL_BODY',      // 신체 슬롯인데 전신이 화면에 다 들어오지 않는다 — 얼굴·상반신 사진
+  'BODY_FACE_MISSING',  // 전신 정면 슬롯인데 얼굴이 없다 — 다른 부위 사진
+  'DEACTIVATED',        // 사용자가 삭제했으나 프로파일 재현을 위해 보존 — 재검사 대상이 아니다
+]);
 export const EmbeddingKind = z.enum(['FACE', 'BODY']);
 export const ProfileStatus = z.enum(['BUILDING', 'ACTIVE', 'ARCHIVED', 'FAILED']);
 
@@ -44,10 +56,12 @@ export const RegenOutcome = z.enum(['IMPROVED', 'NO_CHANGE', 'WORSE', 'ESCALATED
 export const DerivativeKind = z.enum(['SHORTS', 'REELS', 'TIKTOK', 'TEASER', 'THUMBNAIL', 'GIF']);
 export const AuditAction = z.enum([
   'IDENTITY_CREATED', 'IDENTITY_UPDATED', 'IDENTITY_STATUS_CHANGED',
-  'ASSET_UPLOADED', 'ASSET_DEACTIVATED',
+  'IDENTITY_DELETED', 'PROJECT_UPDATED', 'PROJECT_DELETED',
+  'ASSET_UPLOADED', 'ASSET_DEACTIVATED', 'ASSET_DELETED', 'ASSET_RECHECKED',
   'PROFILE_BUILT', 'PROFILE_ACTIVATED',
   'RIGHTS_CHANGED', 'RIGHTS_CHECKED',
-  'IDENTITY_USED', 'PROJECT_GENERATED', 'MAPPING_CONFIRMED',
+  'IDENTITY_USED', 'PROJECT_GENERATED', 'MAPPING_CONFIRMED', 'SEGMENT_PROMPT_CHANGED',
+  'SEGMENT_REFERENCE_ADDED', 'SEGMENT_REFERENCE_REMOVED',
   'QC_MANUAL_ACCEPT', 'MASTER_FINALIZED', 'DERIVATIVE_CREATED', 'DISTRIBUTED',
 ]);
 
@@ -55,6 +69,8 @@ export type UserRole = z.infer<typeof UserRole>;
 export type IdentityStatus = z.infer<typeof IdentityStatus>;
 export type AssetType = z.infer<typeof AssetType>;
 export type CaptureSlot = z.infer<typeof CaptureSlot>;
+export type AssetRejectReason = z.infer<typeof AssetRejectReason>;
+export type PromptReferenceKind = z.infer<typeof PromptReferenceKind>;
 export type SegmentStatus = z.infer<typeof SegmentStatus>;
 export type FindingType = z.infer<typeof FindingType>;
 export type GenerationMode = z.infer<typeof GenerationMode>;

@@ -3,7 +3,7 @@ import type { Job } from 'bullmq';
 import { getProfileCentroids, prisma } from '@crez/db';
 import {
   providerRegistry, route, StaticQuotaView,
-  type GenerationRequest, type ModelDescriptor, type ReferenceAsset,
+  type GenerationRequest, type ModelDescriptor, type PromptAttachment, type ReferenceAsset,
 } from '@crez/providers';
 import {
   CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE, childLogger, storageKey,
@@ -88,14 +88,17 @@ async function submit(data: GenerationJobPayload) {
   const segment = await prisma.segment.findUnique({
     where: { id: data.segmentId },
     include: {
-      project: { include: { cast: { include: { identity: true, profile: true } }, sourceVideos: true } },
+      // 위치(slotIndex) 순서가 곧 제공자에 넘기는 인물·레퍼런스 순서다
+      project: {
+        include: { cast: { orderBy: { slotIndex: 'asc' }, include: { identity: true, profile: true } }, sourceVideos: true },
+      },
       scene: true,
     },
   });
   if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트 없음', data, 404);
 
   const project = segment.project;
-  const config = project.config as { resolution?: string; fps?: number; requiredMode?: string };
+  const config = project.config as { resolution?: string; fps?: number; requiredMode?: string; preferredModel?: string };
   const resolution = Number((config.resolution ?? '1080p').replace('p', ''));
   const requiredMode = config.requiredMode ?? 'pose-guided';
 
@@ -104,18 +107,37 @@ async function submit(data: GenerationJobPayload) {
   const routingRuleset = await prisma.routingRuleset.findFirst({ where: { isActive: true } });
   const weights = (routingRuleset?.weights as never) ?? { identity: 0.45, motion: 0.2, quality: 0.15, speed: 0.1, cost: 0.1 };
 
-  const excludeModelIds = (data.strategy?.params?.excludeModelIds as string[] | undefined) ?? [];
-  const decision = route(models, {
-    segmentDurationMs: segment.endMs - segment.startMs,
-    castSize: project.cast.length,
-    requiredMode,
-    resolution,
-    weights,
-    weightsVersion: routingRuleset?.version ?? 'fallback',
-    quota: new StaticQuotaView({}, Number(process.env.GEN_MODEL_QUOTA ?? 4)),
-    excludeModelIds,
-    preferModelCode: data.modelHint,
-  });
+  // 프로젝트에 지정한 모델. 운영자가 이번 요청에 modelHint를 주면 그쪽이 우선이다.
+  const pinnedModel = data.modelHint ? undefined : config.preferredModel;
+  // 지정 모델이 있으면 재생성의 모델 교체(MODEL_REROUTE)도 따르지 않는다 — 사용자가 고른 모델을 벗어나지 않는다
+  const excludeModelIds = pinnedModel ? [] : ((data.strategy?.params?.excludeModelIds as string[] | undefined) ?? []);
+  let decision: ReturnType<typeof route>;
+  try {
+    decision = route(models, {
+      segmentDurationMs: segment.endMs - segment.startMs,
+      castSize: project.cast.length,
+      requiredMode,
+      resolution,
+      weights,
+      weightsVersion: routingRuleset?.version ?? 'fallback',
+      quota: new StaticQuotaView({}, Number(process.env.GEN_MODEL_QUOTA ?? 4)),
+      excludeModelIds,
+      preferModelCode: data.modelHint ?? pinnedModel,
+    });
+    if (pinnedModel && decision.model.code !== pinnedModel) {
+      throw new CrezError(
+        ErrorCode.GEN_NO_CAPABLE_MODEL,
+        `지정 모델 ${pinnedModel}이(가) 이 구간 조건을 만족하지 않습니다 — 다른 모델로 대체하지 않습니다`,
+        { pinnedModel, requirements: decision.trace.requirements, rejected: decision.trace.rejected },
+        422,
+      );
+    }
+  } catch (e) {
+    if (!(e instanceof CrezError)) throw e;
+    await failRouting(segment.id, project.id, data, e);
+    // 같은 조건이면 몇 번을 다시 해도 같은 결과라 큐 재시도를 하지 않는다
+    return { failed: true, code: e.code };
+  }
 
   // ── 생성 파라미터 조립 ──────────────────────────────
   const sourceVideo = project.sourceVideos[0] ?? null;
@@ -135,6 +157,21 @@ async function submit(data: GenerationJobPayload) {
     });
   }
 
+  // 프롬프트 참고 이미지(배경·의상·헤어). 업로드가 확정되고 삭제되지 않은 것만 쓴다.
+  const promptRefs = await prisma.segmentReference.findMany({
+    where: { segmentId: segment.id, active: true, checksum: { not: 'pending' } },
+    orderBy: { createdAt: 'asc' },
+  });
+  const attachments: PromptAttachment[] = await Promise.all(
+    promptRefs.map(async (r) => ({
+      referenceId: r.id,
+      kind: r.kind as PromptAttachment['kind'],
+      slotIndex: r.slotIndex,
+      storageKey: r.storageKey,
+      signedUrl: await presignedGet(r.storageKey).catch(() => null),
+    })),
+  );
+
   const generationJobId = randomUUID();
   const outputKey = storageKey.segmentOutput(project.id, segment.id, data.attempt);
 
@@ -146,16 +183,20 @@ async function submit(data: GenerationJobPayload) {
     fps: config.fps ?? 30,
     resolution,
     mode: requiredMode as never,
-    prompt: segment.scene?.prompt ?? null,
+    // 세그먼트에 직접 입력한 프롬프트가 우선이고, 비어 있으면 씬 프롬프트를 쓴다
+    prompt: segment.prompt ?? segment.scene?.prompt ?? null,
     seed,
     conditioningStrength,
     cast: castWithRefs,
+    attachments,
     sourceVideoKey: sourceVideo?.storageKey ?? null,
     sourceTracksKey: sourceVideo?.tracksKey ?? null,
     outputKey,
   };
 
   const provider = providerRegistry.resolve(decision.model);
+  // 제공자마다 받을 수 있는 이미지 수가 다르다. 실제로 넘긴 이미지와 빠진 첨부를 기록한다(URL은 만료되므로 제외).
+  const imagePlan = provider.planImages(request);
 
   const created = await prisma.generationJob.create({
     data: {
@@ -172,6 +213,11 @@ async function submit(data: GenerationJobPayload) {
         references: castWithRefs.map((c) => ({
           identityId: c.identityId, assetIds: c.references.map((r) => r.assetId),
         })),
+        attachments: attachments.map((a) => ({ referenceId: a.referenceId, kind: a.kind, slotIndex: a.slotIndex })),
+        imagePlan: {
+          images: imagePlan.images.map(({ url: _url, ...rest }) => rest),
+          droppedReferenceIds: imagePlan.droppedReferenceIds,
+        },
       } as never,
       seed: BigInt(seed),
       status: 'QUEUED',
@@ -323,7 +369,7 @@ async function poll(data: GenerationPollJob & { projectId: string; segmentId: st
 async function rebuildRequest(generationJobId: string): Promise<GenerationRequest> {
   const j = await prisma.generationJob.findUniqueOrThrow({
     where: { id: generationJobId },
-    include: { segment: { include: { project: { include: { cast: true } } } } },
+    include: { segment: { include: { project: { include: { cast: { orderBy: { slotIndex: 'asc' } } } } } } },
   });
   const params = j.params as Record<string, unknown>;
   const savedRefs = (params.references as Array<{ identityId: string; assetIds: string[] }> | undefined) ?? [];
@@ -364,9 +410,46 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
     seed: j.seed ? Number(j.seed) : null,
     conditioningStrength: Number(params.conditioningStrength ?? 0.6),
     cast,
+    // 결과 조회에는 참고 이미지가 필요 없다 — 제출 때 쓴 목록은 params.attachments에 남아 있다
+    attachments: [],
     sourceVideoKey: null, sourceTracksKey: null,
     outputKey: storageKey.segmentOutput(j.segment.projectId, j.segmentId, j.attempt),
   };
+}
+
+/**
+ * 모델 라우팅 단계 실패 — generation job을 만들기 전이다.
+ * api가 제출 전에 GENERATING과 attemptCount를 올려 두므로, 되돌리지 않으면 세그먼트가 GENERATING에 멈추고
+ * 제출되지도 않은 시도가 한도를 깎는다. FAILED로 두어 원인을 고친 뒤 다시 생성할 수 있게 한다.
+ */
+async function failRouting(
+  segmentId: string, projectId: string,
+  data: { traceId: string; orgId: string; attempt: number }, err: CrezError,
+) {
+  await prisma.segment.update({
+    where: { id: segmentId },
+    data: { status: 'FAILED', attemptCount: Math.max(0, data.attempt - 1) },
+  });
+  // 아무것도 만들지 못한 프로젝트가 RUNNING에 남으면 설정을 고칠 수 없다 — 생성 전(READY)으로 되돌린다
+  const [inFlight, produced] = await Promise.all([
+    prisma.segment.count({ where: { projectId, status: { in: ['GENERATING', 'QC'] } } }),
+    prisma.generationJob.count({ where: { segment: { projectId }, status: { notIn: ['CANCELLED', 'FAILED'] } } }),
+  ]);
+  if (inFlight === 0 && produced === 0) {
+    await prisma.project.updateMany({ where: { id: projectId, status: 'RUNNING' }, data: { status: 'READY' } });
+  }
+  const detail = { message: err.message, detail: err.detail ?? null };
+  await emit({
+    type: 'ERROR', projectId, segmentId,
+    payload: { code: err.code, ...detail, segmentStatus: 'FAILED' },
+    traceId: data.traceId,
+  });
+  await audit({
+    orgId: data.orgId, action: 'PROJECT_GENERATED', projectId,
+    payload: { event: 'ROUTING_FAILED', segmentId, attempt: data.attempt, code: err.code, ...detail },
+    traceId: data.traceId,
+  });
+  childLogger({ traceId: data.traceId, segmentId }).warn({ code: err.code, ...detail }, 'generation routing failed');
 }
 
 async function failJob(

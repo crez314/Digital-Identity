@@ -120,14 +120,29 @@ export class GenerationService {
       where: { projectId, status: 'GENERATING' }, data: { status: 'PENDING' },
     });
 
+    // 결과를 하나도 만들지 않은 채 취소했으면 생성 전(READY)으로 되돌린다.
+    // RUNNING에 남으면 생성 설정·캐스팅·구간을 고칠 수 없어 프로젝트가 갇힌다.
+    const reverted = await this.revertToReadyIfNothingGenerated(projectId, project.status);
+
     await this.audit.record({
       orgId: user.orgId, actorId: user.id, action: 'PROJECT_GENERATED', projectId,
-      payload: { event: 'CANCELLED', removedQueueJobs: removed, cancelledJobs: count }, traceId,
+      payload: { event: 'CANCELLED', removedQueueJobs: removed, cancelledJobs: count, revertedToReady: reverted }, traceId,
     });
     await this.events.publish({
       type: 'PROJECT_STATUS', projectId, payload: { status: 'CANCELLED', cancelledJobs: count },
       at: new Date().toISOString(), traceId,
     });
-    return { removedQueueJobs: removed, cancelledJobs: count };
+    return { removedQueueJobs: removed, cancelledJobs: count, revertedToReady: reverted };
+  }
+
+  private async revertToReadyIfNothingGenerated(projectId: string, status: string): Promise<boolean> {
+    if (status !== 'RUNNING') return false;
+    const [inFlight, produced] = await Promise.all([
+      this.prisma.segment.count({ where: { projectId, status: { in: ['GENERATING', 'QC'] } } }),
+      this.prisma.generationJob.count({ where: { segment: { projectId }, status: { notIn: ['CANCELLED', 'FAILED'] } } }),
+    ]);
+    if (inFlight > 0 || produced > 0) return false;
+    await this.prisma.project.update({ where: { id: projectId }, data: { status: 'READY' } });
+    return true;
   }
 }

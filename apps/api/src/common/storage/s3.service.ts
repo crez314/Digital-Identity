@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
-  DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client,
+  DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command,
+  PutObjectCommand, S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { PRESIGN_TTL_SECONDS } from '@crez/shared';
@@ -65,5 +66,25 @@ export class S3Service {
 
   async delete(key: string): Promise<void> {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+  /**
+   * prefix 아래 객체를 모두 지운다(프로젝트·Identity 삭제). 지운 개수를 돌려준다.
+   * 버킷 버전 관리가 켜져 있으면 이전 버전은 남는다 — 복구 여지를 두는 §15 정책과 같다.
+   */
+  async deletePrefix(prefix: string): Promise<number> {
+    if (!prefix.endsWith('/')) throw new Error(`prefix는 '/'로 끝나야 합니다: ${prefix}`); // 'projects/1' 이 'projects/10'까지 지우지 않게
+    let deleted = 0;
+    let token: string | undefined;
+    do {
+      const page = await this.client.send(new ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, ContinuationToken: token }));
+      const keys = (page.Contents ?? []).map((o) => ({ Key: o.Key as string }));
+      if (keys.length) {
+        await this.client.send(new DeleteObjectsCommand({ Bucket: this.bucket, Delete: { Objects: keys, Quiet: true } }));
+        deleted += keys.length;
+      }
+      token = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (token);
+    return deleted;
   }
 }

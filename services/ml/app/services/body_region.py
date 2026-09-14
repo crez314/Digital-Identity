@@ -56,6 +56,19 @@ def person_region(
     return Region(x=x0, y=y0, w=max(0, x1 - x0), h=max(0, y1 - y0))
 
 
+def body_in_frame_ratio(face_y: float, face_h: float, frame_h: int) -> float:
+    """
+    얼굴 기준으로 추정한 전신 높이 중 화면 안에 들어온 비율(0..1).
+    전신 사진이면 1에 가깝고, 얼굴·상반신 사진이면 추정 전신이 화면 아래로 넘쳐 작아진다.
+    """
+    top = face_y - face_h * HEAD_MARGIN_PER_FACE
+    height = face_h * BODY_HEIGHT_PER_FACE
+    if height <= 0:
+        return 0.0
+    visible = min(float(frame_h), top + height) - max(0.0, top)
+    return float(max(0.0, min(1.0, visible / height)))
+
+
 def crop(image, region: Region):
     """영역을 잘라낸다. 유효하지 않으면 None."""
     if not region.is_valid:

@@ -7,6 +7,7 @@ import { PRISMA } from '../../common/prisma.module';
 import { QueueService } from '../../common/queue/queue.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { S3Service } from '../../common/storage/s3.service';
+import { RightsService } from '../rights/rights.service';
 import type { AuthUser } from '../../common/auth/auth.types';
 
 const ASPECT_BY_KIND: Record<string, string> = {
@@ -21,6 +22,7 @@ export class MasterService {
     private readonly queue: QueueService,
     private readonly audit: AuditService,
     private readonly s3: S3Service,
+    private readonly rights: RightsService,
   ) {}
 
   /**
@@ -33,9 +35,23 @@ export class MasterService {
   ) {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, orgId: user.orgId },
-      include: { cast: { include: { identity: true, profile: true } } },
+      include: { cast: { orderBy: { slotIndex: 'asc' }, include: { identity: true, profile: true } } },
     });
     if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
+
+    // §14.1 마스터 결합도 신원이 담긴 콘텐츠를 새로 만드는 일이므로 게이트 2와 같은 기준으로 재검사한다.
+    // 이 검사가 없으면 철회 후 결합한 마스터가 restricted=false로 생성되어 배포 차단을 우회한다.
+    const config = project.config as { usageType?: string; territory?: string };
+    await this.rights.enforce(
+      user,
+      {
+        identityIds: project.cast.map((c) => c.identityId),
+        usageType: config.usageType ?? project.projectType,
+        territory: config.territory,
+      },
+      'GENERATION',
+      traceId,
+    );
 
     const segments = await this.prisma.segment.findMany({
       where: { projectId },

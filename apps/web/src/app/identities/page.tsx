@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { get, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
 import { score } from '@/lib/format';
@@ -26,6 +26,8 @@ const STATUS_STYLE: Record<string, string> = {
 export default function IdentitiesPage() {
   const qc = useQueryClient();
   const [name, setName] = useState('');
+  const [nameMissing, setNameMissing] = useState(false);
+  const nameInput = useRef<HTMLInputElement>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['identities'],
@@ -33,12 +35,24 @@ export default function IdentitiesPage() {
   });
 
   const create = useMutation({
-    mutationFn: () => post('/identities', { displayName: name }),
+    mutationFn: (displayName: string) => post('/identities', { displayName }),
     onSuccess: () => {
       setName('');
       qc.invalidateQueries({ queryKey: ['identities'] });
     },
   });
+
+  // 버튼을 비활성화해 두면 왜 눌리지 않는지 알 수 없다 — 누르게 두고 빠진 입력을 알려준다.
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const displayName = name.trim();
+    if (!displayName) {
+      setNameMissing(true);
+      nameInput.current?.focus();
+      return;
+    }
+    create.mutate(displayName);
+  }
 
   return (
     <div className="space-y-6">
@@ -49,17 +63,28 @@ export default function IdentitiesPage() {
             등록된 인물과 프로파일 버전. code는 미지정 시 CRZ-Annn으로 자동 발번된다.
           </p>
         </div>
-        <div className="flex gap-2">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="표시명"
-            className="rounded border border-neutral-300 px-3 py-1.5 text-sm dark:border-neutral-700 dark:bg-neutral-900"
-          />
-          <Button onClick={() => create.mutate()} disabled={!name || create.isPending}>
-            Identity 생성
-          </Button>
-        </div>
+        <form onSubmit={submit} className="flex flex-col items-end gap-1">
+          <div className="flex gap-2">
+            <input
+              ref={nameInput}
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setNameMissing(false);
+              }}
+              placeholder="표시명"
+              aria-label="표시명"
+              aria-invalid={nameMissing}
+              className={`rounded border px-3 py-1.5 text-sm dark:bg-neutral-900 ${
+                nameMissing ? 'border-red-500' : 'border-neutral-300 dark:border-neutral-700'
+              }`}
+            />
+            <Button type="submit" disabled={create.isPending}>
+              {create.isPending ? '생성 중…' : 'Identity 생성'}
+            </Button>
+          </div>
+          {nameMissing ? <p className="text-xs text-red-500">표시명을 입력하세요</p> : null}
+        </form>
       </div>
 
       <ErrorBox error={create.error ?? error} />

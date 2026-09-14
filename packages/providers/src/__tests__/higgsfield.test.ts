@@ -25,6 +25,7 @@ const req = (over: Partial<GenerationRequest> = {}): GenerationRequest => ({
       { identityId: 'id-a', assetId: 'a2', storageKey: 'k2', signedUrl: 'https://s3/2.jpg', captureSlot: 'LEFT_45', expression: null, quality: 0.7 },
     ],
   }],
+  attachments: [],
   sourceVideoKey: null, sourceTracksKey: null,
   outputKey: 'projects/p1/segments/s1/attempt-1/output.mp4',
   ...over,
@@ -105,6 +106,42 @@ describe('Higgsfield 어댑터 — reference-to-video 요청 본문', () => {
     // 한 인물이 3장을 독식하면 다른 인물의 신원이 전혀 조건화되지 않는다
     expect(urls.filter((u) => u.includes('A-')).length).toBeGreaterThan(0);
     expect(urls.filter((u) => u.includes('B-')).length).toBeGreaterThan(0);
+  });
+
+  it('배경·의상 참고 이미지를 인물 얼굴 다음 자리에 넣고, 남는 자리를 추가 얼굴로 채운다', async () => {
+    fetchMock.mockReturnValue(ok({ status: 'queued', request_id: 'r1' }));
+    const p = new HiggsfieldProvider('higgsfield-veo31-reference', { endpoint: '/veo3.1/reference-to-video' });
+    const withRefs = req({
+      attachments: [
+        { referenceId: 'bg', kind: 'BACKGROUND', slotIndex: null, storageKey: 'kb', signedUrl: 'https://s3/bg.jpg' },
+        { referenceId: 'out', kind: 'OUTFIT', slotIndex: 0, storageKey: 'ko', signedUrl: 'https://s3/outfit.jpg' },
+      ],
+    });
+
+    await p.submit(withRefs, model);
+    const urls: string[] = JSON.parse(fetchMock.mock.calls[0][1].body).image_urls;
+    expect(urls).toEqual(['https://s3/1.jpg', 'https://s3/outfit.jpg', 'https://s3/bg.jpg']);
+    expect(p.planImages(withRefs).droppedReferenceIds).toEqual([]);
+  });
+
+  it('image-to-video는 시작 이미지 1장만 받으므로 참고 이미지는 전달되지 않은 것으로 기록한다', () => {
+    const p = new HiggsfieldProvider('higgsfield-veo31-i2v', { endpoint: '/veo3.1/image-to-video' });
+    const plan = p.planImages(req({
+      mode: 'i2v',
+      attachments: [{ referenceId: 'bg', kind: 'BACKGROUND', slotIndex: null, storageKey: 'kb', signedUrl: 'https://s3/bg.jpg' }],
+    }));
+    expect(plan.images.map((i) => i.url)).toEqual(['https://s3/1.jpg']);
+    expect(plan.droppedReferenceIds).toEqual(['bg']);
+  });
+
+  it('인물 레퍼런스 없이 참고 이미지만 있으면 제출하지 않는다', async () => {
+    const p = new HiggsfieldProvider('higgsfield-veo31-reference', { endpoint: '/veo3.1/reference-to-video' });
+    const onlyBg = req({
+      cast: [{ identityId: 'a', profileId: 'p', slotIndex: 0, appearance: {}, references: [] }],
+      attachments: [{ referenceId: 'bg', kind: 'BACKGROUND', slotIndex: null, storageKey: 'kb', signedUrl: 'https://s3/bg.jpg' }],
+    });
+    await expect(p.submit(onlyBg, model)).rejects.toThrow(/인물 레퍼런스/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('레퍼런스가 없으면 제출하지 않는다', async () => {

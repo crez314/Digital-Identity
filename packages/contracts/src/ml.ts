@@ -38,6 +38,12 @@ export const FaceEmbeddingResult = z.object({
   landmarks: z.array(z.tuple([z.number(), z.number()])).nullable(),
   /** 정면성 — 썸네일 선별(§13) 및 프레임 가중치(§9.2)에 사용 */
   frontality: z.number().min(0).max(1).nullable().optional(),
+  /** 원본 이미지 크기 — 얼굴이 화면에서 차지하는 비율은 판정 계층(워커)이 계산한다 */
+  imageWidth: z.number().int().nullable().optional(),
+  imageHeight: z.number().int().nullable().optional(),
+  /** 선택된(가장 큰) 얼굴의 검출 신뢰도 */
+  detectionScore: z.number().min(0).max(1).nullable().optional(),
+  faceCount: z.number().int().nullable().optional(),
 });
 
 export const EmbedFaceResponse = z.object({
@@ -60,6 +66,12 @@ export const BodyEmbeddingResult = z.object({
   /** 신체 비율 측정치 — shoulderHipRatio, legTorsoRatio 등 */
   bodyRatios: z.record(z.number()).nullable(),
   quality: z.number().min(0).max(1).nullable(),
+  imageWidth: z.number().int().nullable().optional(),
+  imageHeight: z.number().int().nullable().optional(),
+  /** 신체 영역을 유도한 얼굴 bbox. 얼굴이 없으면 null(이미지 전체를 신체로 본다) */
+  faceBbox: BBox.nullable().optional(),
+  /** 얼굴 기준으로 추정한 전신 높이 중 화면 안에 들어온 비율(0..1). 얼굴이 없으면 null */
+  bodyInFrameRatio: z.number().min(0).max(1).nullable().optional(),
 });
 
 export const EmbedBodyResponse = z.object({

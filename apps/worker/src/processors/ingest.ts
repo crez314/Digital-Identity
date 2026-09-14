@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
-import { prisma, insertEmbedding, listEmbeddings, setProfileCentroids } from '@crez/db';
+import { prisma, deleteEmbeddingsForAsset, insertEmbedding, listEmbeddings, setProfileCentroids } from '@crez/db';
 import {
   BODY_EMBEDDING_DIM, CrezError, ErrorCode, FACE_EMBEDDING_DIM,
   REQUIRED_BODY_SLOTS, REQUIRED_FACE_SLOTS, childLogger, storageKey,
@@ -9,9 +9,8 @@ import { JOB_NAME, type AssetQualityJob, type ProfileBuildJob } from '@crez/cont
 import { ml } from '../lib/ml';
 import { storage } from '../lib/storage';
 import { audit } from '../lib/audit';
+import { judgeAsset } from '../lib/asset-judgement';
 
-/** 자산 품질 하한 — 미달 자산은 프로파일 빌드에서 제외한다 (§17 CREZ-IDN-002) */
-const MIN_ASSET_QUALITY = 0.4;
 /** 임베딩 산포 상한 — 초과 시 동일 인물이 아닌 자산 혼입 의심 (§17 CREZ-IDN-003) */
 const MAX_FACE_VARIANCE = 0.08;
 
@@ -51,26 +50,45 @@ async function assetQuality(data: AssetQualityJob) {
     : await ml.embedBody({ imageKeys: [asset.storageKey], traceId: data.traceId });
 
   const r = res.results[0];
-  if (!r?.ok || !r.vector) {
-    await prisma.identityAsset.update({
-      where: { id: asset.id }, data: { isUsable: false, qualityScore: 0 },
-    });
-    log.warn({ error: r?.error }, 'embedding failed — asset marked unusable');
-    return { ok: false, reason: r?.error ?? 'no face detected' };
-  }
+  const face = r && 'bbox' in r ? r : null;
+  const body = r && 'bodyInFrameRatio' in r ? r : null;
+  const processed = !!r?.ok && !!r.vector;
 
-  const quality = r.quality ?? 0;
-  const usable = quality >= MIN_ASSET_QUALITY;
+  const verdict = judgeAsset({
+    assetType: isFace ? 'FACE_IMAGE' : 'BODY_IMAGE',
+    captureSlot: asset.captureSlot,
+    ok: processed,
+    error: r?.error ?? (r ? 'empty vector' : 'no result'),
+    quality: r?.quality ?? null,
+    imageWidth: r?.imageWidth,
+    imageHeight: r?.imageHeight,
+    faceHeight: isFace ? face?.bbox?.h : body?.faceBbox?.h,
+    detectionScore: face?.detectionScore,
+    faceCount: face?.faceCount,
+    frontality: face?.frontality,
+    bodyInFrameRatio: body?.bodyInFrameRatio,
+  });
+  const quality = processed ? (r?.quality ?? 0) : 0;
 
+  // 재검사로 다시 들어온 자산이면 이전 판정의 임베딩을 지운다 — 같은 사진이 두 번 집계되지 않게.
+  await deleteEmbeddingsForAsset(asset.id);
   await prisma.identityAsset.update({
     where: { id: asset.id },
     data: {
       qualityScore: quality,
-      isUsable: usable,
-      ...('bbox' in r && r.bbox ? { width: Math.round(r.bbox.w), height: Math.round(r.bbox.h) } : {}),
+      isUsable: verdict.usable,
+      rejectReason: verdict.reason,
+      qualityDetail: verdict.detail,
+      ...(face?.bbox ? { width: Math.round(face.bbox.w), height: Math.round(face.bbox.h) } : {}),
     },
   });
 
+  if (!processed || !r?.vector) {
+    log.warn({ error: r?.error, reason: verdict.reason }, 'embedding failed — asset marked unusable');
+    return { ok: false, reason: verdict.reason, error: r?.error ?? null };
+  }
+
+  const usable = verdict.usable;
   if (usable) {
     // 개별 이미지 임베딩을 모두 보존해야 재생성 시 "다른 레퍼런스 선택" 전략이 가능하다(§4.1).
     await insertEmbedding({
@@ -86,8 +104,8 @@ async function assetQuality(data: AssetQualityJob) {
     });
   }
 
-  log.info({ quality, usable }, 'asset quality evaluated');
-  return { ok: true, quality, usable, code: usable ? null : ErrorCode.IDN_ASSET_QUALITY };
+  log.info({ quality, usable, reason: verdict.reason, detail: verdict.detail }, 'asset quality evaluated');
+  return { ok: true, quality, usable, code: usable ? null : ErrorCode.IDN_ASSET_QUALITY, reason: verdict.reason };
 }
 
 /**

@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from ..services.imaging import frontality, quality_score
+from ..services.models import OPENCV_LOCK
 from .base import (
     EncodeResult,
     EncoderInfo,
@@ -72,7 +73,8 @@ class SFaceEncoder(FaceEncoder):
             return EncodeResult(ok=False, error="빈 이미지")
 
         h, w = image.shape[:2]
-        _, faces = self._detector(w, h).detect(image)
+        with OPENCV_LOCK:
+            _, faces = self._detector(w, h).detect(image)
         if faces is None or len(faces) == 0:
             return EncodeResult(ok=False, error="no face detected")
 
@@ -83,8 +85,9 @@ class SFaceEncoder(FaceEncoder):
 
         rec = self._recognizer()
         try:
-            aligned = rec.alignCrop(image, row)
-            feature = rec.feature(aligned)
+            with OPENCV_LOCK:
+                aligned = rec.alignCrop(image, row)
+                feature = rec.feature(aligned)
         except Exception as e:  # noqa: BLE001 — 정렬 실패 프레임은 건너뛴다
             return EncodeResult(ok=False, error=f"align/feature 실패: {e}")
 

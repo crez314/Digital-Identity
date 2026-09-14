@@ -49,6 +49,33 @@ export interface ReferenceAsset {
   quality: number | null;
 }
 
+/** 세그먼트 프롬프트에 붙인 참고 이미지 — 배경·의상·헤어 */
+export interface PromptAttachment {
+  referenceId: string;
+  kind: 'BACKGROUND' | 'OUTFIT' | 'HAIR';
+  /** 의상·헤어가 속한 캐스트 위치. 배경이나 전원 공통이면 null */
+  slotIndex: number | null;
+  storageKey: string;
+  /** 외부 제공자용 presigned URL — ReferenceAsset.signedUrl과 같은 규칙 */
+  signedUrl: string | null;
+}
+
+/** 제공자에 실제로 넘기는 이미지 한 장과 그 역할 */
+export interface PlannedImage {
+  role: 'IDENTITY' | PromptAttachment['kind'];
+  url: string;
+  slotIndex: number | null;
+  identityId?: string;
+  assetId?: string;
+  referenceId?: string;
+}
+
+/** 이미지 배분 결과. 한도를 넘어 빠진 첨부는 생성 기록에 남겨 사용자에게 보여준다 */
+export interface ImagePlan {
+  images: PlannedImage[];
+  droppedReferenceIds: string[];
+}
+
 export interface GenerationRequest {
   traceId: string;
   segmentId: string;
@@ -68,6 +95,8 @@ export interface GenerationRequest {
     appearance: Record<string, unknown>;
     references: ReferenceAsset[];
   }>;
+  /** 프롬프트 참고 이미지(배경·의상·헤어). 인물 신원 레퍼런스와 함께 제공자 이미지 한도 안에서 배분된다 */
+  attachments: PromptAttachment[];
   /** pose-guided 모드용 소스 트랙 키 */
   sourceVideoKey: string | null;
   sourceTracksKey: string | null;
@@ -102,6 +131,8 @@ export interface FetchResult {
 
 export interface GenerationProvider {
   readonly code: string;
+  /** 이 제공자에 넘길 이미지와 빠지는 첨부를 계산한다. submit이 쓰는 것과 같은 결과여야 한다 */
+  planImages(req: GenerationRequest): ImagePlan;
   submit(req: GenerationRequest, model: ModelDescriptor): Promise<SubmitResult>;
   poll(providerJobId: string, model: ModelDescriptor): Promise<PollResult>;
   fetchResult(providerJobId: string, req: GenerationRequest, model: ModelDescriptor): Promise<FetchResult>;

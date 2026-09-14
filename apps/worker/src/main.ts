@@ -1,3 +1,4 @@
+import './env';
 import { Worker, type Processor } from 'bullmq';
 import { prisma } from '@crez/db';
 import { QUEUE, QUEUE_POLICY, CrezError, logger, type QueueName } from '@crez/shared';

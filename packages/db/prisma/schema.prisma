@@ -79,6 +79,10 @@ model IdentityAsset {
   fps          Decimal? @db.Decimal(6, 3)
   qualityScore Decimal? @map("quality_score") @db.Decimal(5, 4)
   isUsable     Boolean  @default(true) @map("is_usable")
+  /// 품질검사에서 제외된 사유 코드 (contracts AssetRejectReason). 사용 가능하면 null
+  rejectReason  String? @map("reject_reason")
+  /// 판정에 쓴 측정값과 임계값 — 기준이 바뀌어도 당시 판정을 설명할 수 있게 함께 남긴다
+  qualityDetail Json?   @map("quality_detail")
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   identity   Identity            @relation(fields: [identityId], references: [id], onDelete: Cascade)
@@ -186,6 +190,7 @@ model Project {
   scenes       Scene[]
   segments     Segment[]
   masters      MasterVideo[]
+  references   SegmentReference[]
 
   @@index([orgId, status])
   @@map("project")
@@ -292,6 +297,8 @@ model Segment {
   startMs          Int     @map("start_ms")
   endMs            Int     @map("end_ms")
   status           String // PENDING|GENERATING|QC|PASSED|FAILED|MANUAL_REVIEW
+  /// 세그먼트별 생성 프롬프트. 비어 있으면 씬 프롬프트를 쓴다
+  prompt           String?
   acceptedOutputId String? @map("accepted_output_id") @db.Uuid
   attemptCount     Int     @default(0) @map("attempt_count")
   /// 운영자 수동 승인 사유 (§14.2 감사 대상)
@@ -303,10 +310,35 @@ model Segment {
   scene       Scene?              @relation(fields: [sceneId], references: [id])
   jobs        GenerationJob[]
   regenTasks  RegenerationTask[]
+  references  SegmentReference[]
 
   @@unique([projectId, segmentIndex])
   @@index([projectId, status])
   @@map("segment")
+}
+
+/// 세그먼트 프롬프트에 붙이는 참고 이미지 — 배경·의상·헤어 (인물 신원 레퍼런스와 별개)
+model SegmentReference {
+  id          String   @id @default(uuid()) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  segmentId   String   @map("segment_id") @db.Uuid
+  kind        String // BACKGROUND|OUTFIT|HAIR
+  /// 의상·헤어가 속한 캐스트 위치(project_cast.slot_index). 배경이나 전원 공통이면 null
+  slotIndex   Int?     @map("slot_index")
+  storageKey  String   @map("storage_key")
+  fileName    String   @map("file_name")
+  contentType String   @map("content_type")
+  /// 'pending'이면 업로드 URL만 발급되고 객체는 아직 없다
+  checksum    String
+  /// 생성에 쓰인 뒤 삭제하면 false로 보존한다
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  segment Segment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([segmentId])
+  @@map("segment_reference")
 }
 
 model AiModel {

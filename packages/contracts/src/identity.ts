@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { AssetType, CaptureSlot, EmbeddingKind, Expression, IdentityStatus, ProfileStatus } from './enums';
+import {
+  AssetRejectReason, AssetType, CaptureSlot, EmbeddingKind, Expression, IdentityStatus, ProfileStatus,
+} from './enums';
 
 /** §6.1 Identity API DTO */
 
@@ -66,6 +68,12 @@ export const IdentityAssetDto = z.object({
   qualityScore: z.number().nullable(),
   isUsable: z.boolean(),
   createdAt: z.string().datetime(),
+  /** 이미지 자산 썸네일용 presigned GET URL. 업로드 확정 전이거나 이미지가 아니면 null */
+  previewUrl: z.string().url().nullable(),
+  /** 품질검사 제외 사유. 사용 가능하거나 검사 전이면 null */
+  rejectReason: AssetRejectReason.nullable(),
+  /** 판정에 쓴 측정값과 당시 임계값 (faceHeightRatio, minFaceHeightRatio 등) */
+  qualityDetail: z.record(z.unknown()).nullable(),
 });
 
 /** 캡처 슬롯 충족률 (§6.1 GET /identities/{id}/assets) */

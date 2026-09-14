@@ -4,9 +4,12 @@ import type { PrismaClient } from '@crez/db';
 import { getProfileCentroids } from '@crez/db';
 import { judgeAssignments } from '@crez/engine';
 import {
-  CrezError, ErrorCode, QUEUE, storageKey, TRACK_CENTROID_TOP_K,
+  CrezError, ErrorCode, QUEUE, logger, storageKey, TRACK_CENTROID_TOP_K,
 } from '@crez/shared';
-import { JOB_NAME, ProjectConfig, type SceneInput, type SetCastRequest } from '@crez/contracts';
+import {
+  JOB_NAME, ProjectConfig, type PromptReferenceUploadRequest, type SceneInput, type SetCastRequest,
+  type UpdateProjectRequest,
+} from '@crez/contracts';
 import { PRISMA } from '../../common/prisma.module';
 import { S3Service } from '../../common/storage/s3.service';
 import { QueueService } from '../../common/queue/queue.service';
@@ -14,6 +17,12 @@ import { AuditService } from '../../common/audit/audit.service';
 import { MlClient } from '../../common/ml/ml.client';
 import { RightsService } from '../rights/rights.service';
 import type { AuthUser } from '../../common/auth/auth.types';
+
+/** 구간당 참고 이미지 상한 — Veo reference는 얼굴 포함 3장이라 이보다 많으면 대부분 전달되지 않는다 */
+const MAX_REFERENCES_PER_SEGMENT = 6;
+const REFERENCE_EXT: Record<PromptReferenceUploadRequest['contentType'], string> = {
+  'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
+};
 
 @Injectable()
 export class ProjectService {
@@ -28,6 +37,7 @@ export class ProjectService {
 
   async create(user: AuthUser, input: { title: string; projectType: string; config?: unknown }) {
     const config = ProjectConfig.parse(input.config ?? {});
+    await this.assertPreferredModel(config.requiredMode, config.preferredModel);
     const p = await this.prisma.project.create({
       data: {
         orgId: user.orgId, title: input.title, projectType: input.projectType,
@@ -71,6 +81,111 @@ export class ProjectService {
   }
 
   /**
+   * 지정 모델이 존재·활성이고 생성 방식을 지원하는지 저장 시점에 확인한다.
+   * 생성 때 가서야 실패하면 원인을 찾기 어렵다.
+   */
+  private async assertPreferredModel(mode: string, code: string | undefined) {
+    if (!code) return;
+    const model = await this.prisma.aiModel.findUnique({ where: { code } });
+    if (!model) throw new CrezError(ErrorCode.PRJ_INVALID_STATE, `모델 ${code}을(를) 찾을 수 없습니다`, { code }, 422);
+    if (model.status !== 'ACTIVE') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, `모델 ${code}이(가) 비활성 상태입니다`, { code, status: model.status }, 422);
+    }
+    const modes = (model.capabilities as { modes?: string[] }).modes ?? [];
+    if (!modes.includes(mode)) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE, `모델 ${code}은(는) ${mode} 방식을 지원하지 않습니다 (지원: ${modes.join(', ')})`,
+        { code, mode, modes }, 422,
+      );
+    }
+  }
+
+  /**
+   * §6.3 PATCH /projects/{id} — 제목과 생성 설정(방식·해상도·지정 모델).
+   * 생성 설정은 생성 전(DRAFT·READY)에만 바꾼다. 이미 만든 결과와 설정이 어긋나면 이력을 설명할 수 없다.
+   */
+  async update(user: AuthUser, projectId: string, input: UpdateProjectRequest, traceId: string) {
+    const project = await this.requireProject(user, projectId);
+    if (project.status === 'ARCHIVED') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, 'ARCHIVED 프로젝트는 수정할 수 없습니다', null, 409);
+    }
+    const before = { title: project.title, config: project.config };
+    const data: { title?: string; config?: never } = {};
+    if (input.title !== undefined) data.title = input.title;
+
+    if (input.config) {
+      if (!['DRAFT', 'READY'].includes(project.status)) {
+        throw new CrezError(
+          ErrorCode.PRJ_INVALID_STATE, `${project.status} 상태에서는 생성 설정을 바꿀 수 없습니다 — 생성 전에만 바꿀 수 있습니다`, null, 409,
+        );
+      }
+      const config = { ...(project.config as Record<string, unknown>) };
+      if (input.config.requiredMode) config.requiredMode = input.config.requiredMode;
+      if (input.config.resolution) config.resolution = input.config.resolution;
+      if (input.config.preferredModel === null) delete config.preferredModel;
+      else if (input.config.preferredModel) config.preferredModel = input.config.preferredModel;
+      // 방식만 바꿔도 기존 지정 모델이 새 방식을 지원하지 않을 수 있으므로 합친 결과로 검사한다
+      await this.assertPreferredModel(String(config.requiredMode ?? 'pose-guided'), config.preferredModel as string | undefined);
+      data.config = config as never;
+    }
+
+    const updated = await this.prisma.project.update({ where: { id: projectId }, data });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'PROJECT_UPDATED', projectId,
+      payload: { before, after: { title: updated.title, config: updated.config } }, traceId,
+    });
+    return this.toDto(projectId, user);
+  }
+
+  /**
+   * 프로젝트 삭제. 캐스팅·구간·생성 기록·결과 영상·QC·마스터가 함께 지워진다(FK CASCADE).
+   * 감사 로그는 append-only라 남으며, 무엇을 지웠는지 요약을 기록한다(§14.2).
+   */
+  async remove(user: AuthUser, projectId: string, traceId: string) {
+    const project = await this.requireProject(user, projectId);
+    // 상태가 RUNNING이어도 실제로 도는 작업이 없으면(모델 선택 실패, 취소 후) 지울 수 있어야 한다
+    const inFlight = await this.prisma.segment.count({ where: { projectId, status: { in: ['GENERATING', 'QC'] } } });
+    if (inFlight > 0) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE, `생성·QC가 진행 중인 구간 ${inFlight}개가 있어 삭제할 수 없습니다 — 먼저 취소하세요`, { inFlight }, 409,
+      );
+    }
+
+    const [cast, segmentCount, generationJobCount, masters] = await Promise.all([
+      this.prisma.projectCast.findMany({
+        where: { projectId }, orderBy: { slotIndex: 'asc' },
+        include: { identity: { select: { code: true } }, profile: { select: { version: true } } },
+      }),
+      this.prisma.segment.count({ where: { projectId } }),
+      this.prisma.generationJob.count({ where: { segment: { projectId } } }),
+      this.prisma.masterVideo.findMany({ where: { projectId }, select: { id: true, version: true, status: true, restricted: true } }),
+    ]);
+
+    // 대기 중인 재생성·QC 작업이 삭제된 행을 찾다가 실패하지 않게 먼저 큐에서 뺀다
+    const removedQueueJobs = await this.queue.cancelByProject(projectId);
+    await this.prisma.project.delete({ where: { id: projectId } });
+
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'PROJECT_DELETED', projectId,
+      payload: {
+        title: project.title, projectType: project.projectType, status: project.status, config: project.config,
+        cast: cast.map((c) => ({ slotIndex: c.slotIndex, identityId: c.identityId, code: c.identity.code, profileVersion: c.profile.version })),
+        segmentCount, generationJobCount, masters, removedQueueJobs,
+      },
+      traceId,
+    });
+
+    let deletedObjects = 0;
+    try {
+      deletedObjects = await this.s3.deletePrefix(`projects/${projectId}/`);
+    } catch (e) {
+      // DB 삭제는 끝났다. 남은 객체는 참조가 없으므로 요청은 성공으로 둔다.
+      logger.warn({ traceId, projectId, err: String(e) }, 'project storage cleanup failed');
+    }
+    return { ok: true, deletedObjects };
+  }
+
+  /**
    * §6.3 PUT /projects/{id}/cast
    * 내부적으로 권리검사(게이트 1: 캐스팅) 후 profile version을 고정한다.
    * 이후 프로파일이 갱신되어도 이 프로젝트의 재생성 결과는 달라지지 않는다(§4.1).
@@ -82,6 +197,16 @@ export class ProjectService {
     }
 
     const identityIds = input.cast.map((c) => c.identityId);
+    // 위치(slotIndex)는 1번 위치(0)부터 빠짐없이 이어져야 한다 — 생성 요청에 이 순서로 인물이 전달된다.
+    // 권리 검사(감사 기록이 남는다)보다 먼저 거른다.
+    if (new Set(identityIds).size !== identityIds.length) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '같은 인물을 두 위치에 캐스팅할 수 없습니다', { identityIds }, 422);
+    }
+    const slots = input.cast.map((c) => c.slotIndex).sort((a, b) => a - b);
+    if (slots.some((s, i) => s !== i)) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '위치는 1번부터 빠짐없이 순서대로 지정해야 합니다', { slots }, 422);
+    }
+
     // 게이트 1 — 허용되지 않는 인물은 캐스트에 추가 불가 (§14.1)
     const rightsCheckId = await this.rights.enforce(
       user, { identityIds, usageType: input.usageType, territory: input.territory }, 'CASTING', traceId,
@@ -286,6 +411,13 @@ export class ProjectService {
     if (project.status === 'RUNNING') {
       throw new CrezError(ErrorCode.PRJ_INVALID_STATE, 'RUNNING 중에는 씬을 재정의할 수 없습니다', null, 409);
     }
+    // 씬 재정의는 세그먼트를 새로 만든다 — 세그먼트에 붙은 참고 이미지가 조용히 사라지지 않게 막는다
+    const attached = await this.prisma.segmentReference.count({ where: { projectId, active: true } });
+    if (attached > 0) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE, `구간에 첨부한 참고 이미지 ${attached}장이 있어 구간을 다시 정의할 수 없습니다`, { attached }, 409,
+      );
+    }
 
     await this.prisma.$transaction([
       this.prisma.segment.deleteMany({ where: { projectId } }),
@@ -325,22 +457,159 @@ export class ProjectService {
       where: { projectId },
       orderBy: { segmentIndex: 'asc' },
       include: {
+        scene: { select: { prompt: true } },
         jobs: {
           orderBy: { attempt: 'desc' }, take: 1,
           include: { outputs: { include: { qcRuns: { orderBy: { createdAt: 'desc' }, take: 1 } } } },
         },
+        references: { where: { active: true, checksum: { not: 'pending' } }, orderBy: { createdAt: 'asc' } },
       },
     });
-    return segments.map((s) => {
+    return Promise.all(segments.map(async (s) => {
       const qc = s.jobs[0]?.outputs[0]?.qcRuns[0];
+      const lastParams = s.jobs[0]?.params as
+        | {
+            prompt?: string | null;
+            attachments?: Array<{ referenceId: string }>;
+            imagePlan?: { droppedReferenceIds?: string[] };
+          }
+        | undefined;
       return {
         id: s.id, segmentIndex: s.segmentIndex, sceneId: s.sceneId,
         startMs: s.startMs, endMs: s.endMs, status: s.status,
         attemptCount: s.attemptCount, acceptedOutputId: s.acceptedOutputId,
         latestScore: qc?.overallScore ? Number(qc.overallScore) : null,
         latestQcRunId: qc?.id ?? null,
+        prompt: s.prompt,
+        scenePrompt: s.scene?.prompt ?? null,
+        lastPrompt: lastParams ? (lastParams.prompt ?? null) : null,
+        references: await Promise.all(s.references.map(async (r) => ({
+          id: r.id, kind: r.kind, slotIndex: r.slotIndex, fileName: r.fileName,
+          previewUrl: (await this.s3.presignGet(r.storageKey)).url,
+          createdAt: r.createdAt.toISOString(),
+        }))),
+        lastReferenceIds: (lastParams?.attachments ?? []).map((a) => a.referenceId),
+        lastDroppedReferenceIds: lastParams?.imagePlan?.droppedReferenceIds ?? [],
       };
+    }));
+  }
+
+  private async requireEditableSegment(user: AuthUser, projectId: string, segmentId: string) {
+    const project = await this.requireProject(user, projectId);
+    if (project.status === 'ARCHIVED') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, 'ARCHIVED 프로젝트는 수정할 수 없습니다', null, 409);
+    }
+    const segment = await this.prisma.segment.findFirst({ where: { id: segmentId, projectId } });
+    if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
+    return segment;
+  }
+
+  /**
+   * 참고 이미지(배경·의상·헤어) 업로드 URL 발급 — 인물 자산과 같은 presigned PUT 흐름(§15).
+   * 확정 전에는 checksum='pending'으로 두어 생성에 섞이지 않게 한다.
+   */
+  async createReferenceUploadUrl(
+    user: AuthUser, projectId: string, segmentId: string, input: PromptReferenceUploadRequest,
+  ) {
+    await this.requireEditableSegment(user, projectId, segmentId);
+    const count = await this.prisma.segmentReference.count({ where: { segmentId, active: true } });
+    if (count >= MAX_REFERENCES_PER_SEGMENT) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE, `참고 이미지는 구간당 ${MAX_REFERENCES_PER_SEGMENT}장까지 첨부할 수 있습니다`, { count }, 409,
+      );
+    }
+    const referenceId = randomUUID();
+    const key = storageKey.segmentReference(projectId, segmentId, referenceId, REFERENCE_EXT[input.contentType]);
+    const { url, expiresIn } = await this.s3.presignPut(key, input.contentType);
+    await this.prisma.segmentReference.create({
+      data: {
+        id: referenceId, projectId, segmentId, kind: input.kind, slotIndex: input.slotIndex ?? null,
+        storageKey: key, fileName: input.fileName, contentType: input.contentType, checksum: 'pending',
+      },
     });
+    return { referenceId, uploadUrl: url, expiresInSeconds: expiresIn };
+  }
+
+  async confirmReference(
+    user: AuthUser, projectId: string, segmentId: string, referenceId: string, input: { checksum: string }, traceId: string,
+  ) {
+    const segment = await this.requireEditableSegment(user, projectId, segmentId);
+    const ref = await this.prisma.segmentReference.findFirst({ where: { id: referenceId, segmentId, active: true } });
+    if (!ref) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '참고 이미지를 찾을 수 없음', { referenceId }, 404);
+    const head = await this.s3.head(ref.storageKey);
+    if (!head.exists) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '업로드된 파일이 스토리지에 없습니다', { referenceId }, 409);
+    }
+    await this.prisma.segmentReference.update({ where: { id: referenceId }, data: { checksum: input.checksum } });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'SEGMENT_REFERENCE_ADDED', projectId,
+      payload: {
+        segmentId, segmentIndex: segment.segmentIndex, referenceId, kind: ref.kind, slotIndex: ref.slotIndex,
+        fileName: ref.fileName, checksum: input.checksum,
+      },
+      traceId,
+    });
+    return { id: referenceId, kind: ref.kind, slotIndex: ref.slotIndex };
+  }
+
+  /**
+   * 참고 이미지 삭제. 생성 요청에 들어간 적이 있으면 이력을 설명할 수 있게 파일을 남기고 이후 생성에서만 뺀다.
+   */
+  async removeReference(user: AuthUser, projectId: string, segmentId: string, referenceId: string, traceId: string) {
+    const segment = await this.requireEditableSegment(user, projectId, segmentId);
+    const ref = await this.prisma.segmentReference.findFirst({ where: { id: referenceId, segmentId, active: true } });
+    if (!ref) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '참고 이미지를 찾을 수 없음', { referenceId }, 404);
+
+    const usedByJobs = await this.prisma.generationJob.count({
+      where: { segmentId, params: { path: ['attachments'], array_contains: [{ referenceId }] } },
+    });
+    const base = { segmentId, segmentIndex: segment.segmentIndex, referenceId, kind: ref.kind, slotIndex: ref.slotIndex };
+
+    if (usedByJobs > 0) {
+      await this.prisma.segmentReference.update({ where: { id: referenceId }, data: { active: false } });
+      await this.audit.record({
+        orgId: user.orgId, actorId: user.id, action: 'SEGMENT_REFERENCE_REMOVED', projectId,
+        payload: { ...base, mode: 'DEACTIVATED', usedByJobs }, traceId,
+      });
+      return { ok: true, mode: 'DEACTIVATED' as const };
+    }
+
+    await this.prisma.segmentReference.delete({ where: { id: referenceId } });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'SEGMENT_REFERENCE_REMOVED', projectId,
+      payload: { ...base, mode: 'DELETED', storageKey: ref.storageKey, checksum: ref.checksum }, traceId,
+    });
+    try {
+      await this.s3.delete(ref.storageKey);
+    } catch (e) {
+      logger.warn({ traceId, referenceId, err: String(e) }, 'segment reference object delete failed');
+    }
+    return { ok: true, mode: 'DELETED' as const };
+  }
+
+  /**
+   * 세그먼트별 프롬프트 수정 (§6.3). 비우면 씬 프롬프트로 돌아간다.
+   * 이미 제출된 생성에는 반영되지 않고 다음 시도(재생성 포함)부터 쓰인다 — 실제로 쓴 값은 job params에 남는다.
+   */
+  async updateSegmentPrompt(
+    user: AuthUser, projectId: string, segmentId: string, input: { prompt: string | null }, traceId: string,
+  ) {
+    const project = await this.requireProject(user, projectId);
+    if (project.status === 'ARCHIVED') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, 'ARCHIVED 프로젝트는 수정할 수 없습니다', null, 409);
+    }
+    const segment = await this.prisma.segment.findFirst({ where: { id: segmentId, projectId } });
+    if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
+
+    const prompt = input.prompt?.trim() || null;
+    if (prompt !== segment.prompt) {
+      await this.prisma.segment.update({ where: { id: segmentId }, data: { prompt } });
+      await this.audit.record({
+        orgId: user.orgId, actorId: user.id, action: 'SEGMENT_PROMPT_CHANGED', projectId,
+        payload: { segmentId, segmentIndex: segment.segmentIndex, before: segment.prompt, after: prompt }, traceId,
+      });
+    }
+    return { id: segmentId, prompt };
   }
 
   /**

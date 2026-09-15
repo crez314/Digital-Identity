@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "prisma generate",
     "migrate": "prisma migrate dev",
-    "deploy": "prisma migrate deploy",
+    "deploy": "tsx prisma/deploy.ts",
     "seed": "tsx prisma/seed.ts",
     "studio": "prisma studio"
   },

@@ -37,6 +37,10 @@ services:
     environment:
       MINIO_ROOT_USER: crezadmin
       MINIO_ROOT_PASSWORD: crezadmin
+      # 저장 데이터 암호화(SSE-S3) 키 — 원본 사진을 포함한 모든 객체를 디스크에 암호화해 둔다(§15, §16, ADR 0003).
+      # 개발 전용 값이다. 운영 S3는 버킷 기본 암호화(SSE-KMS)를 쓰고 키를 저장소에 두지 않는다.
+      # 이 값을 바꾸거나 잃으면 기존 객체를 읽을 수 없다.
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-crez-dev-sse:jsAeWGGLp7VU35u/GrDtjwp02vXlGNUoc3uHCYbFGWw=}
     ports: ["9000:9000", "9001:9001"]
     volumes:
       - miniodata:/data
@@ -46,7 +50,7 @@ services:
       timeout: 3s
       retries: 20
 
-  # 버킷 생성 + 퍼블릭 접근 차단 (§15)
+  # 버킷 생성 + 퍼블릭 접근 차단 (§15) + 기본 암호화 (§16)
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -57,6 +61,7 @@ services:
       mc mb --ignore-existing local/crez-media &&
       mc anonymous set none local/crez-media &&
       mc version enable local/crez-media &&
+      mc encrypt set sse-s3 local/crez-media &&
       echo 'bucket ready';
       "
 

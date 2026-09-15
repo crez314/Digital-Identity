@@ -1,5 +1,6 @@
 // CREZ Digital Identity Content Engine — 데이터 모델 (기술명세서 §4)
-// pgvector 컬럼은 Prisma가 네이티브 지원하지 않으므로 Unsupported 타입으로 선언하고
+// 얼굴·신체 벡터는 생체인식정보라 AES-256-GCM 암호문(bytea)으로 저장한다(§16, ADR 0003).
+// 암호문 컬럼은 Unsupported("bytea")로 선언해 Prisma 기본 조회 결과에 섞이지 않게 하고,
 // 읽기/쓰기는 raw SQL(packages/db/src/vector.ts)로 처리한다. dim 컬럼을 병행 관리해
 // 모델 교체 시 차원 변경을 추적한다(§7.2).
 
@@ -100,7 +101,8 @@ model IdentityEmbedding {
   modelName    String   @map("model_name")
   modelVersion String   @map("model_version")
   dim          Int
-  vector       Unsupported("vector(512)")
+  /// AES-256-GCM 암호문 (packages/db/src/biometric.ts). 평문 벡터는 저장하지 않는다
+  vectorEnc    Unsupported("bytea") @map("vector_enc")
   quality      Decimal? @db.Decimal(5, 4)
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -116,8 +118,9 @@ model IdentityProfile {
   identityId   String    @map("identity_id") @db.Uuid
   version      Int
   status       String // BUILDING|ACTIVE|ARCHIVED|FAILED
-  faceCentroid Unsupported("vector(512)")? @map("face_centroid")
-  bodyCentroid Unsupported("vector(256)")? @map("body_centroid")
+  /// 얼굴(512)·신체(256) centroid의 AES-256-GCM 암호문
+  faceCentroidEnc Unsupported("bytea")? @map("face_centroid_enc")
+  bodyCentroidEnc Unsupported("bytea")? @map("body_centroid_enc")
   faceVariance Decimal?  @map("face_variance") @db.Decimal(6, 5)
   attributes   Json      @default("{}")
   modelBundle  Json      @default("{}") @map("model_bundle")
@@ -243,7 +246,8 @@ model SourceTrack {
   startMs       Int      @map("start_ms")
   endMs         Int      @map("end_ms")
   timelineKey   String   @map("timeline_key") // bbox/keypoint 시계열 (S3 parquet)
-  faceCentroid  Unsupported("vector(512)")? @map("face_centroid")
+  /// 트랙 얼굴 centroid의 AES-256-GCM 암호문
+  faceCentroidEnc Unsupported("bytea")? @map("face_centroid_enc")
   quality       Decimal? @db.Decimal(5, 4)
 
   sourceVideo SourceVideo   @relation(fields: [sourceVideoId], references: [id], onDelete: Cascade)

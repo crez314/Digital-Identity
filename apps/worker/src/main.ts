@@ -1,6 +1,6 @@
 import './env';
 import { Worker, type Processor } from 'bullmq';
-import { prisma } from '@crez/db';
+import { assertEncryptionConfig, prisma } from '@crez/db';
 import { QUEUE, QUEUE_POLICY, CrezError, logger, type QueueName } from '@crez/shared';
 import { connection, closeQueues } from './lib/queues';
 import { closeEvents } from './lib/events';
@@ -86,4 +86,6 @@ async function shutdown(signal: string) {
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
+// 암호화 키가 없거나 잘못되면 임베딩 저장이 작업마다 실패한다 — 큐를 받기 전에 멈춘다(§16)
+assertEncryptionConfig();
 start();

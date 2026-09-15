@@ -15,7 +15,7 @@
     "typecheck": "turbo run typecheck",
     "db:generate": "pnpm --filter @crez/db exec prisma generate",
     "db:migrate": "pnpm --filter @crez/db exec prisma migrate dev",
-    "db:deploy": "pnpm --filter @crez/db exec prisma migrate deploy",
+    "db:deploy": "pnpm --filter @crez/db run deploy",
     "db:seed": "pnpm --filter @crez/db run seed",
     "contracts:jsonschema": "pnpm --filter @crez/contracts run jsonschema",
     "licenses:check": "node scripts/license-scan.mjs",

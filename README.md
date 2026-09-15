@@ -18,7 +18,7 @@ pnpm infra:up
 
 # 스키마 · 시드 (샘플 identity 5명 + 더미 모델 어댑터 + QC ruleset)
 pnpm db:generate
-pnpm db:deploy
+pnpm db:deploy     # 생체 벡터 암호화 이행 포함 — prisma migrate deploy를 직접 쓰지 않는다
 pnpm db:seed
 
 # ML 서비스 — 실제 추론(YuNet + SFace, CPU) 또는 mock
@@ -40,6 +40,12 @@ VS Code에서는 `.vscode/launch.json`의 **"전체 스택 (api + worker + web +
 구성으로 네 프로세스를 동시에 디버깅할 수 있다.
 
 개발 인증은 `AUTH_MODE=dev`에서 `x-dev-user` 헤더로 역할을 바꿔 시험한다.
+`AUTH_MODE`는 필수다. 없거나 틀린 값이면 api가 기동하지 않고, `dev`는 `NODE_ENV=production`에서
+거부된다. 운영은 `AUTH_MODE=oidc`와 `OIDC_ISSUER`·`OIDC_AUDIENCE`를 함께 설정한다(§16).
+
+얼굴·신체 임베딩은 `BIOMETRIC_ENCRYPTION_KEY`로 암호화해 저장한다. `.env.example`의 키는 개발 전용이며
+운영에서는 기동이 거부된다 — `openssl rand -hex 32`로 발급하고 비밀 저장소에 백업한다
+([ADR 0003](docs/adr/0003-biometric-vector-encryption.md)).
 
 ```bash
 curl -H "x-dev-user: producer@hicrez.com" http://localhost:3001/api/v1/identities

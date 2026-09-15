@@ -7,6 +7,7 @@ import type { SourceAnalyzeJob } from '@crez/contracts';
 import { ml } from '../lib/ml';
 import { storage } from '../lib/storage';
 import { emit } from '../lib/events';
+import { toStoredTracks } from '../lib/source-tracks';
 
 /**
  * analysis 큐 (§8): 소스 영상 트래킹 + 자동 매핑 제안 (§9.1).
@@ -44,13 +45,12 @@ export async function analysisProcessor(job: Job): Promise<unknown> {
   });
 
   // 트랙 시계열(bbox/keypoint)은 크므로 스토리지에 두고 DB에는 키만 보관한다(§4.2 timeline_key).
+  // 얼굴·신체 벡터는 빼고 남긴다(§16) — toStoredTracks 참조.
   const tracksKey = storageKey.sourceTracks(data.projectId, sv.id);
   await storage.putJson(tracksKey, {
     videoKey: sv.storageKey, fps: analysis.fps, durationMs: analysis.durationMs,
     modelBundle: analysis.modelBundle,
-    tracks: analysis.tracks.map((t) => ({
-      trackIndex: t.trackIndex, startMs: t.startMs, endMs: t.endMs, frames: t.frames,
-    })),
+    tracks: toStoredTracks(analysis.tracks),
   });
 
   await prisma.sourceTrack.deleteMany({ where: { sourceVideoId: sv.id } });

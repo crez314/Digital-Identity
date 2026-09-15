@@ -1,4 +1,7 @@
 """crez-ml 엔드포인트 계약 검증 (§7). mock 모드라 GPU·모델 가중치가 필요 없다."""
+import pytest
+from app.config import Settings
+from pydantic import ValidationError
 
 
 def test_health(client):
@@ -11,6 +14,17 @@ def test_internal_token_required(client):
     """서비스 간 호출만 허용한다 (§1.1)."""
     res = client.post("/v1/embed/face", json={"imageKeys": ["a.jpg"]})
     assert res.status_code == 401
+
+
+def test_internal_token_rejects_wrong_token(client):
+    res = client.post("/v1/embed/face", json={"imageKeys": ["a.jpg"]}, headers={"x-internal-token": "wrong-token"})
+    assert res.status_code == 401
+
+
+def test_internal_token_setting_cannot_be_empty():
+    """빈 토큰이 내부 호출 검사를 끄던 fail-open을 막는다 — 설정 단계에서 거부한다 (§1.1)."""
+    with pytest.raises(ValidationError):
+        Settings(ml_internal_token="  ")
 
 
 def test_embed_face_returns_model_bundle(client, auth):

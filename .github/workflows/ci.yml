@@ -9,7 +9,10 @@ env:
   DATABASE_URL: postgresql://crez:crez@localhost:5432/crez?schema=public
   REDIS_URL: redis://localhost:6379
   FIELD_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  BIOMETRIC_ENCRYPTION_KEY: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 
+# pnpm 버전은 package.json의 packageManager 한 곳에서만 정한다.
+# pnpm/action-setup에 version을 함께 주면 "Multiple versions of pnpm specified"로 설치 단계에서 실패한다.
 jobs:
   # §7.4 금지 라이선스 의존성이 추가되면 빌드를 실패시킨다. 가장 먼저 돌린다.
   licenses:
@@ -18,7 +21,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: pnpm }
       - run: pnpm install --frozen-lockfile=false
@@ -47,7 +49,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: pnpm }
       - run: pnpm install --frozen-lockfile=false
@@ -66,7 +67,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: pnpm }
       - run: pnpm install --frozen-lockfile=false

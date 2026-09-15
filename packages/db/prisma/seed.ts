@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { encryptField } from '../src/crypto';
-import { toVectorLiteral } from '../src/vector';
+import { setProfileCentroids } from '../src/vector';
 
 const prisma = new PrismaClient();
 
@@ -98,10 +98,7 @@ async function main() {
 
     const face = pseudoVector(`${code}-face`, 512);
     const body = pseudoVector(`${code}-body`, 256);
-    await prisma.$executeRawUnsafe(
-      `UPDATE identity_profile SET face_centroid = $1::vector, body_centroid = $2::vector WHERE id = $3::uuid`,
-      toVectorLiteral(face), toVectorLiteral(body), profile.id,
-    );
+    await setProfileCentroids(profile.id, face, body);
 
     // 권리 정보 — 시드 인물은 MV/SHORTS 국내 상업 이용 허용 (§14.1)
     await prisma.identityRights.create({

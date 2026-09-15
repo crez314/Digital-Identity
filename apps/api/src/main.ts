@@ -1,12 +1,19 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { assertEncryptionConfig } from '@crez/db';
 import { logger } from '@crez/shared';
 import { AppModule } from './app.module';
+import { assertAuthConfig } from './common/auth/auth-mode';
 import { CrezExceptionFilter } from './common/filters/crez-exception.filter';
 import { TraceInterceptor } from './common/interceptors/trace.interceptor';
 
 async function bootstrap() {
+  // 설정이 잘못되면 요청을 받기 전에 멈춘다(§16) — 인증 모드 누락(fail-open)과 암호화 키 누락.
+  // .env는 AppModule을 불러올 때 ConfigModule.forRoot가 이미 process.env에 넣어 두었다.
+  const authMode = assertAuthConfig();
+  assertEncryptionConfig();
+
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
   app.setGlobalPrefix('api/v1'); // §6 Base path
@@ -25,7 +32,7 @@ async function bootstrap() {
 
   const port = Number(process.env.API_PORT ?? 3001);
   await app.listen(port, '0.0.0.0');
-  logger.info({ port }, 'crez-api listening');
+  logger.info({ port, authMode }, 'crez-api listening');
 }
 
 bootstrap().catch((e) => {

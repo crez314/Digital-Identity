@@ -1,77 +1,150 @@
 {
   "1": {
     "class_type": "UnetLoaderGGUF",
-    "inputs": { "unet_name": "Wan2.1-VACE-1.3B-Q5_K_M.gguf" }
+    "inputs": {
+      "unet_name": "Wan2.1-VACE-1.3B-Q5_K_M.gguf"
+    }
   },
   "2": {
     "class_type": "CLIPLoaderGGUF",
-    "inputs": { "clip_name": "umt5-xxl-encoder-Q5_K_M.gguf", "type": "wan" }
+    "inputs": {
+      "clip_name": "umt5-xxl-encoder-Q5_K_M.gguf",
+      "type": "wan"
+    }
   },
   "3": {
     "class_type": "VAELoader",
-    "inputs": { "vae_name": "wan_2.1_vae.safetensors" }
+    "inputs": {
+      "vae_name": "wan_2.1_vae.safetensors"
+    }
   },
   "4": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "clip": ["2", 0],
+      "clip": [
+        "2",
+        0
+      ],
       "text": "The same man from the reference image dancing in place, natural body motion, one continuous shot, same face, same clothes, indoor office, soft daylight"
     }
   },
   "5": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "clip": ["2", 0],
+      "clip": [
+        "2",
+        0
+      ],
       "text": "different person, face swap, identity change, morphing face, deformed face, cut, jump cut, scene change, new location, subject replaced, different hairstyle, different clothes, blurry, low quality"
     }
   },
   "6": {
     "class_type": "LoadImage",
-    "inputs": { "image": "ref.png", "upload": "image" }
+    "inputs": {
+      "image": "ref.png",
+      "upload": "image"
+    }
   },
   "7": {
     "class_type": "ModelSamplingSD3",
-    "inputs": { "model": ["1", 0], "shift": 8.0 }
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift": 8.0
+    }
   },
   "8": {
     "class_type": "WanVaceToVideo",
     "inputs": {
-      "positive": ["4", 0],
-      "negative": ["5", 0],
-      "vae": ["3", 0],
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
       "width": 480,
       "height": 640,
       "length": 33,
       "batch_size": 1,
       "strength": 1.0,
-      "reference_image": ["6", 0]
+      "reference_image": [
+        "6",
+        0
+      ]
     }
   },
   "9": {
     "class_type": "KSampler",
     "inputs": {
-      "model": ["7", 0],
-      "positive": ["8", 0],
-      "negative": ["8", 1],
-      "latent_image": ["8", 2],
+      "model": [
+        "7",
+        0
+      ],
+      "positive": [
+        "8",
+        0
+      ],
+      "negative": [
+        "8",
+        1
+      ],
+      "latent_image": [
+        "8",
+        2
+      ],
       "seed": 12345,
       "steps": 20,
       "cfg": 6.0,
-      "sampler_name": "uni_pc",
+      "sampler_name": "euler",
       "scheduler": "simple",
       "denoise": 1.0
     }
   },
   "10": {
     "class_type": "TrimVideoLatent",
-    "inputs": { "samples": ["9", 0], "trim_amount": ["8", 3] }
+    "inputs": {
+      "samples": [
+        "9",
+        0
+      ],
+      "trim_amount": [
+        "8",
+        3
+      ]
+    }
   },
   "11": {
     "class_type": "VAEDecode",
-    "inputs": { "samples": ["10", 0], "vae": ["3", 0] }
+    "inputs": {
+      "samples": [
+        "10",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    }
   },
   "12": {
     "class_type": "SaveWEBM",
-    "inputs": { "images": ["11", 0], "filename_prefix": "wan_vace", "codec": "vp9", "fps": 16.0, "crf": 24.0 }
+    "inputs": {
+      "images": [
+        "11",
+        0
+      ],
+      "filename_prefix": "wan_vace",
+      "codec": "vp9",
+      "fps": 16.0,
+      "crf": 24.0
+    }
   }
 }

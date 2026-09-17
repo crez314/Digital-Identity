@@ -135,6 +135,12 @@ export const SetScenesRequest = z.object({ scenes: z.array(SceneInput).min(1) })
 /** PATCH /projects/{id}/segments/{segmentId} — 세그먼트별 프롬프트. 비우면 씬 프롬프트를 쓴다 */
 export const UpdateSegmentRequest = z.object({
   prompt: z.string().max(4000).nullable(),
+  /**
+   * 앞 구간의 마지막 프레임에서 이어서 생성한다 — 컷 없이 이어지는 긴 장면용.
+   * 생성물을 다시 입력으로 쓰는 것이라 세대 손실이 쌓이므로, 연속 사슬은 MAX_CHAIN_LENGTH에서
+   * 끊기고 원본 인물 레퍼런스로 돌아간다. 대부분의 뮤직비디오는 2~4초마다 컷이 바뀌므로 필요 없다.
+   */
+  chainFromPrevious: z.boolean().optional(),
 });
 
 /** 참고 이미지 형식 — 제공자 API와 OpenCV가 모두 읽을 수 있는 것만 받는다 */

@@ -11,6 +11,15 @@ export const MAX_REGEN = 3;
  * PAID_AUTO_REGEN_LIMIT 환경변수로 올릴 수 있다.
  */
 export const PAID_AUTO_REGEN_LIMIT = 0;
+/**
+ * 앞 구간의 마지막 프레임을 다음 구간의 시작 프레임으로 넘기는 사슬의 최대 길이 (§5.1).
+ *
+ * 컷 없이 이어지는 장면을 만들려면 이어 붙여야 하지만, 생성물의 마지막 프레임을 다시 입력으로
+ * 쓰는 일이 반복되면 색이 바래고 디테일이 뭉개지며 인물이 조금씩 흘러간다(세대 손실).
+ * 이 값에 도달하면 사슬을 끊고 원본 인물 레퍼런스에서 다시 출발한다.
+ */
+export const MAX_CHAIN_LENGTH = 3;
+
 /** 연속 NO_CHANGE 횟수가 이 값이면 즉시 MANUAL_REVIEW 승격 (§5.1) */
 export const NO_CHANGE_ESCALATION_LIMIT = 2;
 
@@ -85,6 +94,9 @@ export const storageKey = {
     `projects/${projectId}/source/${sourceVideoId}/tracks.parquet`,
   segmentOutput: (projectId: string, segmentId: string, attempt: number) =>
     `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/output.mp4`,
+  /** 앞 구간에서 뽑아 이 구간의 시작 프레임으로 넘기는 이미지 */
+  segmentChainStart: (projectId: string, segmentId: string, attempt: number) =>
+    `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/chain-start.jpg`,
   segmentReference: (projectId: string, segmentId: string, referenceId: string, ext: string) =>
     `projects/${projectId}/segments/${segmentId}/references/${referenceId}.${ext}`,
   qcFrame: (projectId: string, segmentId: string, attempt: number, ms: number) =>

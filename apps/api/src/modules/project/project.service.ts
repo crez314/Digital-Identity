@@ -481,6 +481,7 @@ export class ProjectService {
         latestScore: qc?.overallScore ? Number(qc.overallScore) : null,
         latestQcRunId: qc?.id ?? null,
         prompt: s.prompt,
+        chainFromPrevious: s.chainFromPrevious,
         scenePrompt: s.scene?.prompt ?? null,
         lastPrompt: lastParams ? (lastParams.prompt ?? null) : null,
         references: await Promise.all(s.references.map(async (r) => ({
@@ -624,7 +625,8 @@ export class ProjectService {
    * 이미 제출된 생성에는 반영되지 않고 다음 시도(재생성 포함)부터 쓰인다 — 실제로 쓴 값은 job params에 남는다.
    */
   async updateSegmentPrompt(
-    user: AuthUser, projectId: string, segmentId: string, input: { prompt: string | null }, traceId: string,
+    user: AuthUser, projectId: string, segmentId: string,
+    input: { prompt: string | null; chainFromPrevious?: boolean }, traceId: string,
   ) {
     const project = await this.requireProject(user, projectId);
     if (project.status === 'ARCHIVED') {
@@ -634,14 +636,29 @@ export class ProjectService {
     if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
 
     const prompt = input.prompt?.trim() || null;
-    if (prompt !== segment.prompt) {
-      await this.prisma.segment.update({ where: { id: segmentId }, data: { prompt } });
+    // 첫 구간은 앞이 없어 이어 붙일 대상이 없다 — 켜 두면 무시되므로 애초에 받지 않는다
+    if (input.chainFromPrevious && segment.segmentIndex === 0) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        '첫 구간은 앞 구간이 없어 이어 붙일 수 없습니다',
+        { segmentId, segmentIndex: segment.segmentIndex }, 422,
+      );
+    }
+    const chainFromPrevious = input.chainFromPrevious ?? segment.chainFromPrevious;
+
+    if (prompt !== segment.prompt || chainFromPrevious !== segment.chainFromPrevious) {
+      await this.prisma.segment.update({ where: { id: segmentId }, data: { prompt, chainFromPrevious } });
       await this.audit.record({
         orgId: user.orgId, actorId: user.id, action: 'SEGMENT_PROMPT_CHANGED', projectId,
-        payload: { segmentId, segmentIndex: segment.segmentIndex, before: segment.prompt, after: prompt }, traceId,
+        payload: {
+          segmentId, segmentIndex: segment.segmentIndex,
+          before: segment.prompt, after: prompt,
+          chainBefore: segment.chainFromPrevious, chainAfter: chainFromPrevious,
+        },
+        traceId,
       });
     }
-    return { id: segmentId, prompt };
+    return { id: segmentId, prompt, chainFromPrevious };
   }
 
   /**

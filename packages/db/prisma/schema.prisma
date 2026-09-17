@@ -303,6 +303,9 @@ model Segment {
   status           String // PENDING|GENERATING|QC|PASSED|FAILED|MANUAL_REVIEW
   /// 세그먼트별 생성 프롬프트. 비어 있으면 씬 프롬프트를 쓴다
   prompt           String?
+  /// 앞 구간의 마지막 프레임을 이 구간의 시작 프레임으로 쓴다 — 컷 없이 이어지는 긴 장면용.
+  /// 세대 손실이 누적되므로 연속 사슬은 MAX_CHAIN_LENGTH에서 끊고 원본 레퍼런스로 돌아간다(§5.1).
+  chainFromPrevious Boolean @default(false) @map("chain_from_previous")
   acceptedOutputId String? @map("accepted_output_id") @db.Uuid
   attemptCount     Int     @default(0) @map("attempt_count")
   /// 운영자 수동 승인 사유 (§14.2 감사 대상)

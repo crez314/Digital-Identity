@@ -6,7 +6,8 @@ import {
   type GenerationRequest, type ModelDescriptor, type PromptAttachment, type ReferenceAsset,
 } from '@crez/providers';
 import {
-  CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE, childLogger, storageKey, withIdentityAnchor,
+  CrezError, ErrorCode, MAX_CHAIN_LENGTH, MAX_GENERATION_ATTEMPT, QUEUE,
+  childLogger, storageKey, withIdentityAnchor,
 } from '@crez/shared';
 import { inspectPrompt, summarizeRisks } from '@crez/engine';
 import { JOB_NAME, type GenerationJobPayload, type GenerationPollJob } from '@crez/contracts';
@@ -15,6 +16,7 @@ import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
+import { buildChainStartFrame, shouldChain } from '../lib/chain-start';
 
 /**
  * generation 큐 (§8, §12).
@@ -94,6 +96,52 @@ async function pickReferences(
       lead: i === leadIndex,
     })),
   );
+}
+
+/**
+ * 이어 붙일 시작 프레임을 준비한다. 이어 붙이지 않기로 했거나 앞 구간 결과물이 아직 없으면 null이다.
+ *
+ * 앞 구간이 아직 채택되지 않았는데 이어 붙이라고 하면 이어 붙일 대상 자체가 없다 —
+ * 그 경우 조용히 인물 레퍼런스로 시작하고 로그를 남긴다. 순서대로 생성하면 자연히 해결된다.
+ */
+async function resolveChainStart(
+  segment: { id: string; projectId: string; segmentIndex: number; chainFromPrevious: boolean },
+  attempt: number,
+  traceId: string,
+): Promise<{ url: string; storageKey: string; fromSegmentId: string } | null> {
+  if (!segment.chainFromPrevious) return null;
+  const log = childLogger({ traceId, segmentId: segment.id });
+
+  const siblings = await prisma.segment.findMany({
+    where: { projectId: segment.projectId },
+    orderBy: { segmentIndex: 'asc' },
+    select: { id: true, segmentIndex: true, chainFromPrevious: true, acceptedOutputId: true },
+  });
+  const index = siblings.findIndex((s) => s.id === segment.id);
+  if (!shouldChain(siblings.map((s) => s.chainFromPrevious), index)) {
+    log.info({ segmentIndex: segment.segmentIndex },
+      `이어 붙이기 사슬이 한도(${MAX_CHAIN_LENGTH})에 닿아 인물 레퍼런스에서 다시 시작한다`);
+    return null;
+  }
+
+  const previous = siblings[index - 1];
+  if (!previous?.acceptedOutputId) {
+    log.warn({ previousSegmentIndex: previous?.segmentIndex },
+      '앞 구간에 채택된 결과물이 없어 이어 붙일 수 없다 — 인물 레퍼런스로 시작한다');
+    return null;
+  }
+
+  const output = await prisma.generationOutput.findUnique({ where: { id: previous.acceptedOutputId } });
+  if (!output) return null;
+
+  const frame = await buildChainStartFrame({
+    previousOutputKey: output.storageKey,
+    projectId: segment.projectId,
+    segmentId: segment.id,
+    attempt,
+    traceId,
+  });
+  return frame ? { ...frame, fromSegmentId: previous.id } : null;
 }
 
 async function loadModels(): Promise<ModelDescriptor[]> {
@@ -182,6 +230,26 @@ async function submit(data: GenerationJobPayload) {
       // 구간 번호로 대표 사진을 돌린다 — 컷마다 다른 장면에서 출발하도록
       references: await pickReferences(c.identityId, data.strategy, segment.segmentIndex),
     });
+  }
+
+  // 컷 없이 이어지는 장면이면 앞 구간의 마지막 프레임에서 출발한다 (§5.1).
+  // 세대 손실이 쌓이므로 사슬은 MAX_CHAIN_LENGTH에서 끊고 원본 레퍼런스로 돌아간다.
+  const chain = await resolveChainStart(segment, data.attempt, data.traceId);
+  if (chain && castWithRefs[0]) {
+    castWithRefs[0].references = [
+      {
+        identityId: castWithRefs[0].identityId,
+        assetId: `chain:${chain.fromSegmentId}`,
+        storageKey: chain.storageKey,
+        signedUrl: chain.url,
+        captureSlot: null,
+        expression: null,
+        quality: null,
+        lead: true,
+      },
+      // 인물 레퍼런스는 뒤에 남겨 둔다 — 이미지를 여러 장 받는 제공자는 신원 근거로 함께 쓴다
+      ...castWithRefs[0].references.map((r) => ({ ...r, lead: false })),
+    ];
   }
 
   // 프롬프트 참고 이미지(배경·의상·헤어). 업로드가 확정되고 삭제되지 않은 것만 쓴다.

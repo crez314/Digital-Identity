@@ -16,7 +16,7 @@ import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
-import { buildChainStartFrame, shouldChain } from '../lib/chain-start';
+import { buildChainStartFrame, CHAIN_ASSET_PREFIX, isChainAsset, shouldChain } from '../lib/chain-start';
 
 /**
  * generation 큐 (§8, §12).
@@ -239,7 +239,7 @@ async function submit(data: GenerationJobPayload) {
     castWithRefs[0].references = [
       {
         identityId: castWithRefs[0].identityId,
-        assetId: `chain:${chain.fromSegmentId}`,
+        assetId: `${CHAIN_ASSET_PREFIX}${chain.fromSegmentId}`,
         storageKey: chain.storageKey,
         signedUrl: chain.url,
         captureSlot: null,
@@ -340,8 +340,13 @@ async function submit(data: GenerationJobPayload) {
         conditioningStrength,
         strategy: data.strategy ?? null,
         references: castWithRefs.map((c) => ({
-          identityId: c.identityId, assetIds: c.references.map((r) => r.assetId),
+          identityId: c.identityId,
+          // 이어 붙인 시작 프레임은 identity_asset 행이 아니다 — 여기 섞으면 결과 조회 때
+          // 자산을 UUID로 되찾는 과정에서 통째로 실패한다(2026-09-17 실측).
+          assetIds: c.references.map((r) => r.assetId).filter((id) => !isChainAsset(id)),
         })),
+        // 이어 붙인 사실은 따로 남긴다 — 나중에 "이 컷은 무엇에서 이어졌나"를 설명할 수 있어야 한다
+        chainStart: chain ? { fromSegmentId: chain.fromSegmentId, storageKey: chain.storageKey } : null,
         attachments: attachments.map((a) => ({ referenceId: a.referenceId, kind: a.kind, slotIndex: a.slotIndex })),
         imagePlan: {
           images: imagePlan.images.map(({ url: _url, ...rest }) => rest),
@@ -522,7 +527,9 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
 
   const cast = await Promise.all(
     j.segment.project.cast.map(async (c) => {
-      const assetIds = savedRefs.find((r) => r.identityId === c.identityId)?.assetIds ?? [];
+      // 과거 기록에 섞여 들어간 비-UUID(이어 붙이기 가짜 id)도 걸러 낸다
+      const assetIds = (savedRefs.find((r) => r.identityId === c.identityId)?.assetIds ?? [])
+        .filter((id) => !isChainAsset(id));
       const assets = assetIds.length
         ? await prisma.identityAsset.findMany({ where: { id: { in: assetIds } } })
         : [];

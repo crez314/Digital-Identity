@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldChain } from '../lib/chain-start';
+import { CHAIN_ASSET_PREFIX, isChainAsset, shouldChain } from '../lib/chain-start';
 
 /**
  * 컷 없이 이어지는 장면은 앞 구간의 마지막 프레임에서 출발한다.
@@ -43,5 +43,14 @@ describe('이어 붙이기 사슬', () => {
   it('범위 밖 구간 번호는 이어 붙이지 않는다', () => {
     expect(shouldChain([false, true], 5)).toBe(false);
     expect(shouldChain([], 0)).toBe(false);
+  });
+});
+
+describe('이어 붙인 시작 프레임의 id', () => {
+  it('실제 자산 id와 구분된다', () => {
+    // 2026-09-17: 이 가짜 id가 자산 조회에 섞여 들어가 결과 조회가 통째로 실패했다.
+    // identity_asset에 없는 값이라 UUID 파싱 단계에서 터진다.
+    expect(isChainAsset(`${CHAIN_ASSET_PREFIX}370c922b-f5fc-44cb-b38c-668a684f9e03`)).toBe(true);
+    expect(isChainAsset('370c922b-f5fc-44cb-b38c-668a684f9e03')).toBe(false);
   });
 });

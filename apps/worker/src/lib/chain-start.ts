@@ -18,6 +18,17 @@ import { downloadTo, presignedGet, uploadFrom } from './media-io';
  * 컷이 바뀌는 편이 자연스럽고, 세대 손실도 없다.
  */
 
+/** 이어 붙인 시작 프레임의 가짜 assetId 접두사 — 실제 identity_asset 행이 아니다 */
+export const CHAIN_ASSET_PREFIX = 'chain:';
+
+/**
+ * 이어 붙인 시작 프레임인가.
+ * 이 id는 identity_asset에 없으므로 자산 조회에 넣으면 안 된다 — UUID가 아니라 조회 자체가 터진다.
+ */
+export function isChainAsset(assetId: string): boolean {
+  return assetId.startsWith(CHAIN_ASSET_PREFIX);
+}
+
 /**
  * 이 구간에서 실제로 이어 붙일지 판단한다.
  * chainFlags[i]는 구간 i의 chainFromPrevious 값이다(구간 번호 순서).

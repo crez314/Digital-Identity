@@ -8,8 +8,9 @@ import { getProfileCentroids, prisma } from '@crez/db';
 import { ml } from '../src/lib/ml';
 
 async function main() {
-  const [segmentId, attemptArg] = process.argv.slice(2);
+  const [segmentId, attemptArg, fpsArg] = process.argv.slice(2);
   const attempt = Number(attemptArg);
+  const sampleFps = Number(fpsArg ?? 5);
   const job = await prisma.generationJob.findFirstOrThrow({
     where: { segmentId, attempt },
     include: { outputs: true, segment: { include: { project: { include: { cast: true } } } } },
@@ -26,11 +27,13 @@ async function main() {
       : [];
   });
 
+  const startedAt = Date.now();
   const res = await ml.scoreQc({
     videoKey: output.storageKey,
     references,
-    sampleFps: 5,
+    sampleFps,
   } as never);
+  console.log(`sampleFps=${sampleFps} 채점 ${Date.now() - startedAt}ms`);
 
   for (const p of (res as never as { perIdentity: Array<Record<string, unknown>> }).perIdentity) {
     const series = (p.series ?? []) as Array<Record<string, number | null>>;

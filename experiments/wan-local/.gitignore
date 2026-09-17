@@ -1,0 +1,4 @@
+# ComfyUI 설치본·가상환경·모델 가중치는 저장소에 넣지 않는다 (수 GB)
+runtime/
+venv/
+outputs/

@@ -175,6 +175,11 @@ export const GenerateRequest = z.object({
   segmentIds: z.array(z.string().uuid()).optional(), // 미지정 시 PENDING 전체
   modelHint: z.string().optional(),
   priority: z.number().int().min(1).max(10).default(5),
+  /**
+   * 이번 실행에 허용하는 최대 비용. 견적이 이 값을 넘으면 아무것도 제출하지 않고 409로 돌려준다.
+   * 생략하면 COST_CONFIRM_THRESHOLD까지만 자동 진행하고, 그보다 크면 명시를 요구한다(§12.1).
+   */
+  maxCost: z.number().nonnegative().optional(),
 });
 
 export const SegmentDto = z.object({

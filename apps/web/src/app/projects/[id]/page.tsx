@@ -121,6 +121,21 @@ interface CastRow {
 /** @crez/shared MAX_GENERATION_ATTEMPT와 같은 값 (웹은 shared를 직접 쓰지 않는다) */
 const MAX_ATTEMPT = 3;
 
+interface CostEstimate {
+  segmentCount: number;
+  min: number;
+  max: number;
+  worstCase: number;
+  free: boolean;
+  pinnedModel: string | null;
+}
+
+/** 모델이 고정돼 있으면 한 값, 아니면 구간으로 보여 준다 */
+function costText(e: CostEstimate): string {
+  const body = e.min === e.max ? `${e.max}` : `${e.min}~${e.max}`;
+  return `${body} 크레딧 (재시도까지 최대 ${e.worstCase})`;
+}
+
 interface Dashboard {
   counts: Record<string, number>;
   blockers: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number; attemptCount: number }>;
@@ -147,7 +162,17 @@ export default function ProjectDetail() {
     qc.invalidateQueries({ queryKey: ['project', id] });
   });
 
-  const generate = useMutation({ mutationFn: () => post(`/projects/${id}/generate`, {}) });
+  // 실행 전 견적 — 4분짜리는 구간 48개라 버튼 한 번이 수십 건의 유료 생성이다(§12.1)
+  const estimate = useQuery({
+    queryKey: ['generate-estimate', id],
+    queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
+    enabled: Boolean(project.data),
+  });
+  const generate = useMutation({
+    // 화면에 보여 준 견적을 그대로 상한으로 올려 보낸다 — 본 것과 나가는 것이 같아야 한다
+    mutationFn: () => post(`/projects/${id}/generate`, { maxCost: estimate.data?.max }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['generate-estimate', id] }),
+  });
   // 시도 한도를 다 쓴 구간은 재생성 사다리로도 못 되살린다 — 원인을 고친 뒤 되돌리는 경로
   const resetSegment = useMutation({
     mutationFn: (segmentId: string) => post(`/projects/${id}/segments/${segmentId}/reset`, {}),
@@ -205,6 +230,11 @@ export default function ProjectDetail() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {status === 'DRAFT' ? <span className="text-xs text-amber-500">생성 준비를 먼저 완료하세요</span> : null}
+          {estimate.data && !estimate.data.free && estimate.data.segmentCount > 0 ? (
+            <span className="text-xs text-neutral-600">
+              예상 비용 {costText(estimate.data)} · 구간 {estimate.data.segmentCount}개
+            </span>
+          ) : null}
           <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT' || generatable === 0}>생성 실행</Button>
           <Button variant="secondary" onClick={() => cancel.mutate()}>취소</Button>
           <Button variant="secondary" onClick={() => master.mutate()}>마스터 생성</Button>

@@ -20,6 +20,15 @@ export const PAID_AUTO_REGEN_LIMIT = 0;
  */
 export const MAX_CHAIN_LENGTH = 3;
 
+/**
+ * 이 비용을 넘는 실행은 운영자가 상한(maxCost)을 명시해야 제출된다 (§12.1).
+ *
+ * 4분 영상은 구간 48개라 실행 한 번이 수십 건의 유료 생성을 한꺼번에 제출한다.
+ * 제출한 요청은 제공자가 취소를 거부할 수 있어 되돌릴 수 없으므로, 사후가 아니라 사전에 막는다.
+ * GENERATION_COST_CONFIRM_THRESHOLD 환경변수로 조정한다.
+ */
+export const COST_CONFIRM_THRESHOLD = 10;
+
 /** 연속 NO_CHANGE 횟수가 이 값이면 즉시 MANUAL_REVIEW 승격 (§5.1) */
 export const NO_CHANGE_ESCALATION_LIMIT = 2;
 

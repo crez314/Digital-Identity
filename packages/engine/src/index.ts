@@ -9,3 +9,4 @@ export * from './fusion';
 export * from './distance';
 export * from './prompt-guard';
 export * from './sequence';
+export * from './cost';

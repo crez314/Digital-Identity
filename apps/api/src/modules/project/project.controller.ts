@@ -137,9 +137,19 @@ export class ProjectController {
     return this.svc.setScenes(user, id, body.scenes);
   }
 
+  @Post(':id/generate/estimate')
+  @RequirePermission('READ')
+  @ApiOperation({ summary: '실행 전 비용 견적. 아무것도 제출하지 않는다 (§12.1)' })
+  estimate(
+    @CurrentUser() user: AuthUser, @Param('id') id: string,
+    @Body(new ZodValidationPipe(GenerateRequest)) body: GenerateRequest,
+  ) {
+    return this.generation.estimate(user, id, body);
+  }
+
   @Post(':id/generate')
   @RequirePermission('PROJECT_RUN')
-  @ApiOperation({ summary: '생성 실행. 제출 직전 권리 재검사 (§14.1 게이트 2)' })
+  @ApiOperation({ summary: '생성 실행. 제출 직전 권리 재검사(§14.1 게이트 2), 견적이 상한을 넘으면 거절(§12.1)' })
   generate(
     @CurrentUser() user: AuthUser, @Param('id') id: string,
     @Body(new ZodValidationPipe(GenerateRequest)) body: GenerateRequest,

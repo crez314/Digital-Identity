@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { PrismaClient } from '@crez/db';
-import { CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE } from '@crez/shared';
+import { COST_CONFIRM_THRESHOLD, CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE } from '@crez/shared';
+import { estimateRun } from '@crez/engine';
 import { JOB_NAME } from '@crez/contracts';
 import { PRISMA } from '../../common/prisma.module';
 import { QueueService } from '../../common/queue/queue.service';
@@ -13,6 +14,12 @@ import type { AuthUser } from '../../common/auth/auth.types';
  * §6.3 POST /projects/{id}/generate — 생성 실행.
  * crez-api는 큐 제출까지만 담당한다. 모델 라우팅·제출·폴링은 워커가 한다(§2.2).
  */
+/** 확인 없이 진행할 수 있는 상한. 운영 중 조정할 수 있게 환경변수를 먼저 본다 */
+function costConfirmThreshold(): number {
+  const v = Number(process.env.GENERATION_COST_CONFIRM_THRESHOLD);
+  return Number.isFinite(v) && v >= 0 ? v : COST_CONFIRM_THRESHOLD;
+}
+
 @Injectable()
 export class GenerationService {
   constructor(
@@ -23,9 +30,20 @@ export class GenerationService {
     private readonly rights: RightsService,
   ) {}
 
+  /**
+   * §6.3 POST /projects/{id}/generate/estimate — 제출 없이 비용만 계산한다.
+   * 4분짜리는 구간 48개라 실행 한 번이 수십 건의 유료 생성이다. 누르기 전에 볼 수 있어야 한다.
+   */
+  async estimate(user: AuthUser, projectId: string, input: { segmentIds?: string[]; modelHint?: string }) {
+    const project = await this.prisma.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
+    if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
+    const segments = await this.selectSegments(projectId, input.segmentIds);
+    return this.estimateCost(project, segments, input.modelHint);
+  }
+
   async generate(
     user: AuthUser, projectId: string,
-    input: { segmentIds?: string[]; modelHint?: string; priority?: number },
+    input: { segmentIds?: string[]; modelHint?: string; priority?: number; maxCost?: number },
     traceId: string,
   ) {
     const project = await this.prisma.project.findFirst({
@@ -53,13 +71,7 @@ export class GenerationService {
       traceId,
     );
 
-    const segments = await this.prisma.segment.findMany({
-      where: {
-        projectId,
-        ...(input.segmentIds?.length ? { id: { in: input.segmentIds } } : { status: { in: ['PENDING', 'FAILED'] } }),
-      },
-      orderBy: { segmentIndex: 'asc' },
-    });
+    const segments = await this.selectSegments(projectId, input.segmentIds);
     if (segments.length === 0) {
       // 어떤 상태라서 빠졌는지 알려준다 — "없습니다"만으로는 무엇을 해야 할지 알 수 없다
       const byStatus = await this.prisma.segment.groupBy({ by: ['status'], where: { projectId }, _count: true });
@@ -69,6 +81,24 @@ export class GenerationService {
         `생성 대기(PENDING)·실패(FAILED) 구간이 없습니다 — 현재 ${summary}. `
         + 'MANUAL_REVIEW 구간은 QC 화면에서 재생성을 요청하거나 승인하고, 되돌리려면 구간 초기화를 쓰세요.',
         { statuses: Object.fromEntries(byStatus.map((g) => [g.status, g._count])) },
+        409,
+      );
+    }
+
+    // 실제로 제출할 구간만 견적에 넣는다 — 한도를 다 쓴 구간은 어차피 나가지 않는다
+    const willSubmit = segments.filter(
+      (s) => s.status !== 'GENERATING' && s.status !== 'QC' && s.attemptCount < MAX_GENERATION_ATTEMPT,
+    );
+    const cost = await this.estimateCost(project, willSubmit, input.modelHint);
+    const cap = input.maxCost ?? costConfirmThreshold();
+    if (cost.max > cap) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        input.maxCost !== undefined
+          ? `견적 ${cost.max}이 지정한 상한 ${cap}을 넘습니다 — 구간을 줄이거나 상한을 올리세요`
+          : `견적 ${cost.max}이 확인 없이 진행하는 한도 ${cap}을 넘습니다 — maxCost로 상한을 명시해야 제출합니다`
+            + ` (구간 ${cost.segmentCount}개, 최악의 경우 ${cost.worstCase})`,
+        { estimate: cost, cap },
         409,
       );
     }
@@ -117,6 +147,8 @@ export class GenerationService {
       orgId: user.orgId, actorId: user.id, action: 'PROJECT_GENERATED', projectId,
       payload: {
         segmentCount: submitted.length,
+        estimatedCost: { min: cost.min, max: cost.max, worstCase: cost.worstCase, models: cost.models },
+        costCap: cap,
         modelHint: input.modelHint ?? null,
         cast: project.cast.map((c) => ({ identityId: c.identityId, profileId: c.profileId, code: c.identity.code })),
       },
@@ -129,7 +161,50 @@ export class GenerationService {
       at: new Date().toISOString(), traceId,
     });
 
-    return { submitted, traceId };
+    return { submitted, estimatedCost: cost, traceId };
+  }
+
+  /** 자동 선택(PENDING·FAILED)과 지정 선택을 한 곳에서 처리한다 — 견적과 실행이 같은 집합을 봐야 한다 */
+  private selectSegments(projectId: string, segmentIds?: string[]) {
+    return this.prisma.segment.findMany({
+      where: {
+        projectId,
+        ...(segmentIds?.length ? { id: { in: segmentIds } } : { status: { in: ['PENDING', 'FAILED'] } }),
+      },
+      orderBy: { segmentIndex: 'asc' },
+    });
+  }
+
+  /**
+   * 구간 길이 × 모델 초당 단가. 모델이 고정돼 있지 않으면 라우터가 무엇을 고를지 알 수 없으므로
+   * 후보 단가의 최소·최대 구간으로 답한다.
+   */
+  private async estimateCost(
+    project: { config: unknown },
+    segments: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number }>,
+    modelHint?: string,
+  ) {
+    const config = project.config as { preferredModel?: string; requiredMode?: string };
+    const pinned = modelHint ?? config.preferredModel;
+
+    const models = await this.prisma.aiModel.findMany({
+      where: { status: 'ACTIVE', ...(pinned ? { code: pinned } : {}) },
+      select: { code: true, costPerSecond: true, capabilities: true },
+    });
+    // 모드가 맞지 않는 모델은 라우터가 고를 수 없으므로 견적에서도 뺀다
+    const mode = config.requiredMode;
+    const candidates = models.filter((m) => {
+      if (!mode) return true;
+      const modes = (m.capabilities as { modes?: string[] } | null)?.modes;
+      return !modes || modes.includes(mode);
+    });
+
+    const estimate = estimateRun(
+      segments.map((s) => ({ segmentId: s.id, segmentIndex: s.segmentIndex, durationMs: s.endMs - s.startMs })),
+      candidates.map((m) => Number(m.costPerSecond ?? 0)),
+      MAX_GENERATION_ATTEMPT,
+    );
+    return { ...estimate, models: candidates.map((m) => m.code), pinnedModel: pinned ?? null };
   }
 
   /** §6.3 POST /projects/{id}/cancel */

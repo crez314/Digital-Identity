@@ -1,5 +1,5 @@
 import {
-  CrezError, ErrorCode, logger, IDENTITY_NEGATIVE_PROMPT, promptAdherenceFromConditioning,
+  CrezError, ErrorCode, logger, IDENTITY_NEGATIVE_PROMPT, promptAdherenceFromConditioning, snapDuration,
   type ErrorCodeValue,
 } from '@crez/shared';
 import type {
@@ -96,7 +96,8 @@ function durationFor(endpoint: string, durationMs: number): { value: number; sna
   const wanted = durationMs / 1000;
   // 세그먼트 길이는 임의값이지만 제공자는 고정 길이만 받는다. 가장 가까운 값으로 맞추고
   // 그 사실을 호출자에게 알린다 — 조용히 길이가 바뀌면 QC 시계열이 소스와 어긋난다.
-  const value = options.reduce((a, b) => (Math.abs(b - wanted) < Math.abs(a - wanted) ? b : a));
+  // 맞추는 규칙은 비용 견적과 공유한다(@crez/shared). 둘이 어긋나면 상한이 제 역할을 못 한다.
+  const value = snapDuration(options, wanted);
   return { value, snapped: Math.abs(value - wanted) > 0.01 };
 }
 

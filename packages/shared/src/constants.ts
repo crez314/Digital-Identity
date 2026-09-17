@@ -29,6 +29,19 @@ export const MAX_CHAIN_LENGTH = 3;
  */
 export const COST_CONFIRM_THRESHOLD = 10;
 
+/**
+ * 제공자가 고정 길이만 받을 때 요청 길이를 허용 값으로 맞춘다 (§12.1).
+ *
+ * 구간 길이는 임의값이지만 kling은 5·10초, veo3.1은 4·6·8초만 받는다. 가장 가까운 값으로 맞추므로
+ * **실제 과금 길이는 구간 길이와 다르다** — 4초 구간은 5초로 올라가 25% 더 나간다.
+ * 견적과 제출이 같은 값을 써야 상한이 제 역할을 한다.
+ */
+export function snapDuration(options: number[] | null | undefined, seconds: number): number {
+  const usable = (options ?? []).filter((o) => Number.isFinite(o) && o > 0);
+  if (usable.length === 0) return seconds;
+  return usable.reduce((a, b) => (Math.abs(b - seconds) < Math.abs(a - seconds) ? b : a));
+}
+
 /** 연속 NO_CHANGE 횟수가 이 값이면 즉시 MANUAL_REVIEW 승격 (§5.1) */
 export const NO_CHANGE_ESCALATION_LIMIT = 2;
 

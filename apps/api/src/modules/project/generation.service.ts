@@ -178,6 +178,10 @@ export class GenerationService {
   /**
    * 구간 길이 × 모델 초당 단가. 모델이 고정돼 있지 않으면 라우터가 무엇을 고를지 알 수 없으므로
    * 후보 단가의 최소·최대 구간으로 답한다.
+   *
+   * 견적과 실제 제출이 같은 후보 집합을 봐야 상한이 제 역할을 한다. 없는 모델을 modelHint로 주면
+   * 견적은 0인데 워커는 다른 유료 모델을 골라 제출하던 우회 경로가 있었다 —
+   * 그래서 쓸 수 없는 지정 모델은 여기서 거절한다.
    */
   private async estimateCost(
     project: { config: unknown },
@@ -191,7 +195,9 @@ export class GenerationService {
       where: { status: 'ACTIVE', ...(pinned ? { code: pinned } : {}) },
       select: { code: true, costPerSecond: true, capabilities: true },
     });
-    // 모드가 맞지 않는 모델은 라우터가 고를 수 없으므로 견적에서도 뺀다
+    // 모드가 맞지 않는 모델은 라우터가 고를 수 없으므로 견적에서도 뺀다.
+    // 라우터는 길이·인원·해상도까지 더 걸러내므로 여기 후보는 실제 후보를 포함하는 더 넓은 집합이다 —
+    // 상한 판정에 쓰는 max는 그만큼 보수적이 된다.
     const mode = config.requiredMode;
     const candidates = models.filter((m) => {
       if (!mode) return true;
@@ -199,9 +205,25 @@ export class GenerationService {
       return !modes || modes.includes(mode);
     });
 
+    if (candidates.length === 0) {
+      throw new CrezError(
+        ErrorCode.GEN_NO_CAPABLE_MODEL,
+        pinned
+          ? `지정 모델 ${pinned}을(를) 쓸 수 없습니다 — 등록되어 있고 ACTIVE이며 ${mode ?? '이 방식'}을 지원하는지 확인하세요`
+          : `${mode ?? '이 방식'}을 지원하는 활성 모델이 없습니다`,
+        { pinnedModel: pinned ?? null, requiredMode: mode ?? null },
+        422,
+      );
+    }
+
     const estimate = estimateRun(
       segments.map((s) => ({ segmentId: s.id, segmentIndex: s.segmentIndex, durationMs: s.endMs - s.startMs })),
-      candidates.map((m) => Number(m.costPerSecond ?? 0)),
+      candidates.map((m) => ({
+        code: m.code,
+        costPerSecond: Number(m.costPerSecond ?? 0),
+        // 제공자가 고정 길이만 받으면 과금 길이가 구간 길이와 다르다 — 4초 구간이 5초로 올라간다
+        durations: (m.capabilities as { durations?: number[] } | null)?.durations ?? null,
+      })),
       MAX_GENERATION_ATTEMPT,
     );
     return { ...estimate, models: candidates.map((m) => m.code), pinnedModel: pinned ?? null };

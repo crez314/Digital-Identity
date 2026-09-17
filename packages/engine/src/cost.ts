@@ -1,3 +1,5 @@
+import { snapDuration } from '@crez/shared';
+
 /**
  * 실행 전 비용 견적 (§12.1).
  *
@@ -39,21 +41,37 @@ export interface RunCostEstimate {
 const round = (n: number) => Number(n.toFixed(4));
 
 /**
- * @param rates 후보 모델의 초당 단가 목록. 모델이 고정돼 있으면 1개만 넣는다.
+ * 후보 모델 하나. 제공자가 고정 길이만 받으면 `durations`에 허용 값을 넣는다 —
+ * 과금은 구간 길이가 아니라 **제공자에 보내는 길이**로 매겨지기 때문이다.
+ */
+export interface CostCandidate {
+  code: string;
+  costPerSecond: number;
+  /** 제공자가 받는 길이(초). 비어 있으면 구간 길이를 그대로 보낸다고 본다 */
+  durations?: number[] | null;
+}
+
+/**
+ * @param candidates 후보 모델. 모델이 고정돼 있으면 1개만 넣는다.
  * @param maxAttempt 구간당 시도 한도 (§5.1) — 최악의 경우 계산에 쓴다.
  */
 export function estimateRun(
   segments: CostSegment[],
-  rates: number[],
+  candidates: CostCandidate[],
   maxAttempt: number,
 ): RunCostEstimate {
-  const usable = rates.filter((r) => Number.isFinite(r) && r > 0);
-  const minRate = usable.length > 0 ? Math.min(...usable) : 0;
-  const maxRate = usable.length > 0 ? Math.max(...usable) : 0;
+  const usable = candidates.filter((c) => Number.isFinite(c.costPerSecond) && c.costPerSecond > 0);
 
   const perSegment = segments.map((s) => {
     const seconds = Math.max(0, s.durationMs) / 1000;
-    return { ...s, min: round(seconds * minRate), max: round(seconds * maxRate) };
+    // 모델마다 보내는 길이가 달라질 수 있으므로 비용은 모델별로 계산한 뒤 최소·최대를 고른다.
+    // 구간 길이에 단가만 곱하면 4초 구간이 5초로 스냅되는 모델에서 25% 모자라게 나온다.
+    const costs = usable.map((c) => snapDuration(c.durations, seconds) * c.costPerSecond);
+    return {
+      ...s,
+      min: round(costs.length > 0 ? Math.min(...costs) : 0),
+      max: round(costs.length > 0 ? Math.max(...costs) : 0),
+    };
   });
 
   const min = round(perSegment.reduce((sum, s) => sum + s.min, 0));

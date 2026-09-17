@@ -394,7 +394,10 @@ model GenerationJob {
 
 model GenerationOutput {
   id         String   @id @default(uuid()) @db.Uuid
-  jobId      String   @map("job_id") @db.Uuid
+  /// 한 시도(job)당 결과물은 하나다. 이 유일 제약이 중복 저장을 막는 잠금 역할을 한다 —
+  /// 상태를 먼저 SUCCEEDED로 바꿔 선점하면 내려받기 도중 워커가 죽었을 때
+  /// 결과물 없는 성공으로 남아 재시도·복구 스캔이 모두 건너뛴다.
+  jobId      String   @unique @map("job_id") @db.Uuid
   storageKey String   @map("storage_key")
   durationMs Int?     @map("duration_ms")
   fps        Decimal? @db.Decimal(6, 3)

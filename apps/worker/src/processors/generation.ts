@@ -28,7 +28,11 @@ export async function generationProcessor(job: Job): Promise<unknown> {
     case JOB_NAME.GENERATION_SUBMIT:
       return submit(job.data as GenerationJobPayload);
     case JOB_NAME.GENERATION_POLL:
-      return poll(job.data as GenerationPollJob & { projectId: string; segmentId: string; orgId: string });
+      // 큐 재시도가 남아 있는지 알아야 결과물 수집 실패를 확정할지 판단할 수 있다
+      return poll(
+        job.data as GenerationPollJob & { projectId: string; segmentId: string; orgId: string },
+        isLastAttempt(job),
+      );
     case JOB_NAME.GENERATION_CANCEL:
       return cancelSubmission(job.data as CancelJob);
     default:
@@ -182,9 +186,11 @@ async function submit(data: GenerationJobPayload) {
   const weights = (routingRuleset?.weights as never) ?? { identity: 0.45, motion: 0.2, quality: 0.15, speed: 0.1, cost: 0.1 };
 
   // 프로젝트에 지정한 모델. 운영자가 이번 요청에 modelHint를 주면 그쪽이 우선이다.
-  const pinnedModel = data.modelHint ? undefined : config.preferredModel;
+  // 둘 중 무엇이든 "사용자가 고른 모델"이므로 벗어나지 않는다(§12) — 예전에는 modelHint만
+  // 하드 가드 밖에 있어서, 없는 모델을 지정하면 라우터가 조용히 점수 1위 모델을 골라 제출하고 과금됐다.
+  const requestedModel = data.modelHint ?? config.preferredModel;
   // 지정 모델이 있으면 재생성의 모델 교체(MODEL_REROUTE)도 따르지 않는다 — 사용자가 고른 모델을 벗어나지 않는다
-  const excludeModelIds = pinnedModel ? [] : ((data.strategy?.params?.excludeModelIds as string[] | undefined) ?? []);
+  const excludeModelIds = requestedModel ? [] : ((data.strategy?.params?.excludeModelIds as string[] | undefined) ?? []);
   let decision: ReturnType<typeof route>;
   try {
     decision = route(models, {
@@ -196,13 +202,13 @@ async function submit(data: GenerationJobPayload) {
       weightsVersion: routingRuleset?.version ?? 'fallback',
       quota: new StaticQuotaView({}, Number(process.env.GEN_MODEL_QUOTA ?? 4)),
       excludeModelIds,
-      preferModelCode: data.modelHint ?? pinnedModel,
+      preferModelCode: requestedModel,
     });
-    if (pinnedModel && decision.model.code !== pinnedModel) {
+    if (requestedModel && decision.model.code !== requestedModel) {
       throw new CrezError(
         ErrorCode.GEN_NO_CAPABLE_MODEL,
-        `지정 모델 ${pinnedModel}이(가) 이 구간 조건을 만족하지 않습니다 — 다른 모델로 대체하지 않습니다`,
-        { pinnedModel, requirements: decision.trace.requirements, rejected: decision.trace.rejected },
+        `지정 모델 ${requestedModel}이(가) 이 구간 조건을 만족하지 않습니다 — 다른 모델로 대체하지 않습니다`,
+        { requestedModel, chosen: decision.model.code, requirements: decision.trace.requirements, rejected: decision.trace.rejected },
         422,
       );
     }
@@ -411,7 +417,26 @@ async function submit(data: GenerationJobPayload) {
   }
 }
 
-async function poll(data: GenerationPollJob & { projectId: string; segmentId: string; orgId: string }) {
+/**
+ * 이번이 큐의 마지막 시도인가. BullMQ가 더 재시도하지 않을 때만 실패를 확정한다 —
+ * 일시적인 내려받기 실패로 이미 지불한 결과를 버리지 않기 위해서다.
+ * reconciler가 새 job으로 다시 집어가므로 여기서 확정하지 않아도 유실되지 않는다.
+ */
+export function isLastAttempt(job: { attemptsMade?: number; opts?: { attempts?: number } }): boolean {
+  const made = job.attemptsMade ?? 0;
+  const allowed = job.opts?.attempts ?? 1;
+  return made + 1 >= allowed;
+}
+
+/** Prisma 유일 제약 위반 — 같은 job의 결과물을 다른 폴링이 먼저 저장했다 */
+export function isUniqueViolation(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002';
+}
+
+async function poll(
+  data: GenerationPollJob & { projectId: string; segmentId: string; orgId: string },
+  lastAttempt = true,
+) {
   const log = childLogger({ traceId: data.traceId, generationJobId: data.generationJobId });
 
   const genJob = await prisma.generationJob.findUnique({
@@ -460,14 +485,17 @@ async function poll(data: GenerationPollJob & { projectId: string; segmentId: st
   }
 
   // ── SUCCEEDED ──────────────────────────────────────
-  // 폴링 체인이 재시도 등으로 둘 이상 살아 있으면 여기 동시에 도착한다. 306행의 상태 검사만으로는
-  // 같은 밀리초에 들어온 것들을 막지 못해 결과물과 QC가 중복 생성된다(실측: output 3~4건, QC 3건 = ML 비용 3배).
-  // 완료 표시를 먼저 선점(CAS)해서 한 번만 마무리한다.
-  const claimed = await prisma.generationJob.updateMany({
-    where: { id: genJob.id, status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] } },
-    data: { status: 'SUCCEEDED', finishedAt: new Date() },
-  });
-  if (claimed.count === 0) return { skipped: 'already finalized' };
+  // 폴링 체인이 재시도 등으로 둘 이상 살아 있으면 여기 동시에 도착한다. 상태 검사만으로는
+  // 같은 밀리초에 들어온 것들을 막지 못해 결과물과 QC가 중복 생성된다(실측: output 3~4건 = ML 비용 3배).
+  //
+  // 그렇다고 상태를 먼저 SUCCEEDED로 바꿔 선점하면 안 된다. 내려받기 도중 워커가 죽으면
+  // "결과물 없는 성공"으로 남는데, 폴링은 종료 상태를 건너뛰고 reconciler는 SUBMITTED·RUNNING만 훑어
+  // 아무도 복구하지 못한다. 유료로 만든 결과를 다시 가져올 길이 사라진다.
+  //
+  // 그래서 순서를 뒤집는다 — 내려받아 저장에 성공한 다음에 SUCCEEDED로 확정한다.
+  // 중복은 generation_output.job_id 유일 제약이 막는다. 둘이 동시에 내려받아도 저장은 하나만 성공한다.
+  const already = await prisma.generationOutput.findUnique({ where: { jobId: genJob.id } });
+  if (already) return { skipped: 'already finalized' };
 
   let result;
   let output;
@@ -487,13 +515,25 @@ async function poll(data: GenerationPollJob & { projectId: string; segmentId: st
       },
     });
   } catch (e) {
-    // 선점해 놓고 내려받기·저장에서 깨지면 SUCCEEDED인데 결과물이 없는 상태로 남는다 — 실패로 확정한다
+    // 경쟁에서 진 경우 — 다른 폴링이 먼저 저장했다. 실패가 아니므로 조용히 물러난다.
+    if (isUniqueViolation(e)) return { skipped: 'already finalized' };
+
+    // 내려받기·저장 실패는 여기서 확정하지 않는다. job은 RUNNING으로 남아 큐 재시도와
+    // reconciler가 다시 집어간다. 제공자에 결과가 남아 있는 한 다시 가져올 수 있고,
+    // 여기서 FAILED로 못 박으면 이미 지불한 결과를 버리게 된다.
+    if (!lastAttempt) {
+      log.warn({ err: String(e) }, '결과물 수집 실패 — 재시도 대상으로 남긴다');
+      throw e;
+    }
+    // 큐 재시도를 다 쓰고도 안 되면 그때 실패로 확정한다
     await failJob(genJob.id, data.segmentId, data.projectId, data, ErrorCode.GEN_PROVIDER_ERROR, e);
     throw e;
   }
-  // 상태·완료시각은 위에서 선점할 때 이미 기록했다. 여기서는 비용만 채운다.
+
+  // 결과물이 자리를 잡은 뒤에야 성공이다
   await prisma.generationJob.update({
-    where: { id: genJob.id }, data: { costAmount: result.costAmount },
+    where: { id: genJob.id },
+    data: { status: 'SUCCEEDED', finishedAt: new Date(), costAmount: result.costAmount },
   });
   await prisma.segment.update({ where: { id: data.segmentId }, data: { status: 'QC' } });
 

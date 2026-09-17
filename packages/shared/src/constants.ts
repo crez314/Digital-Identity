@@ -4,6 +4,13 @@
 export const MAX_GENERATION_ATTEMPT = 3;
 /** 재생성 전략 사다리 최대 단계 (§5.1, §11) */
 export const MAX_REGEN = 3;
+/**
+ * 과금 제공자(ai_model.capabilities.billable)의 QC 실패 시 자동 재생성 한도 (§11).
+ * 기본 0 — 자동 재생성은 곧 자동 과금이고, 제출한 요청은 제공자가 취소를 거부할 수 있어 되돌릴 수 없다(§12.1).
+ * 운영자가 QC 결과를 보고 수동 재생성(POST /segments/{id}/regenerate)으로만 다시 돌린다.
+ * PAID_AUTO_REGEN_LIMIT 환경변수로 올릴 수 있다.
+ */
+export const PAID_AUTO_REGEN_LIMIT = 0;
 /** 연속 NO_CHANGE 횟수가 이 값이면 즉시 MANUAL_REVIEW 승격 (§5.1) */
 export const NO_CHANGE_ESCALATION_LIMIT = 2;
 

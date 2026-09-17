@@ -47,6 +47,12 @@ export const QcThresholds = z.object({
   trackLostMinDurationSec: z.number(),
   /** 프레임 유효성 판정 최소 품질 */
   minFrameQuality: z.number(),
+  /**
+   * §9.1 τ_assign — track을 캐스트 인물로 인정하는 최소 유사도.
+   * 이 값을 넘지 못한 track은 "다른 사람"이며 그 인물의 지표에 섞이면 안 된다.
+   * 기존 ruleset 행에는 없는 값이라 기본값을 둔다.
+   */
+  assignMinSimilarity: z.number().default(0.35),
 });
 
 export const RulesetDto = z.object({

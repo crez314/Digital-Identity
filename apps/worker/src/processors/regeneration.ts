@@ -112,9 +112,11 @@ export async function regenerationProcessor(job: Job): Promise<unknown> {
     },
   });
 
-  const attempt = segment.attemptCount + 1;
+  // 시도 번호는 job 이력에서 이어 붙이고(유일 제약), 한도 카운터는 따로 올린다 (§5.1)
+  const last = await prisma.generationJob.aggregate({ _max: { attempt: true }, where: { segmentId: segment.id } });
+  const attempt = Math.max(last._max.attempt ?? 0, segment.attemptCount) + 1;
   await prisma.segment.update({
-    where: { id: segment.id }, data: { status: 'GENERATING', attemptCount: attempt },
+    where: { id: segment.id }, data: { status: 'GENERATING', attemptCount: segment.attemptCount + 1 },
   });
 
   await queues.generation.add(JOB_NAME.GENERATION_SUBMIT, {

@@ -3,10 +3,10 @@
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { get, post } from '@/lib/api';
+import { del, get, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
 import {
-  GenerationSettingsFields, MODE_INFO, defaultModelFor, useModels, type GenerationSettings,
+  GenerationSettingsFields, MODE_INFO, defaultMode, defaultModelFor, useModels, type GenerationSettings,
 } from '@/components/generation-settings';
 
 interface ProjectRow {
@@ -34,14 +34,38 @@ export default function ProjectsPage() {
   const [type, setType] = useState('MV');
   // 모델 목록이 오기 전에는 null — 도착하면 인물 레퍼런스 방식의 실제 모델을 기본으로 잡는다
   const [settings, setSettings] = useState<GenerationSettings | null>(null);
+  // 쓸 수 있는 모델이 있는 방식을 기본값으로 잡는다 — 모델 목록이 도착하면 다시 계산된다
+  const startMode = defaultMode(models.data);
   const current: GenerationSettings = settings ?? {
-    requiredMode: 'reference', resolution: '1080p', preferredModel: defaultModelFor(models.data, 'reference'),
+    requiredMode: startMode, resolution: '1080p', aspectRatio: '16:9',
+    preferredModel: defaultModelFor(models.data, startMode),
   };
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['projects'],
     queryFn: () => get<{ items: ProjectRow[] }>('/projects?limit=50'),
   });
+
+  // 목록에서 바로 삭제. 생성·QC가 진행 중인 구간이 있으면 서버가 거절한다(먼저 취소해야 한다).
+  const [removing, setRemoving] = useState<string | null>(null);
+  const remove = useMutation({
+    mutationFn: (id: string) => del<{ deletedObjects: number }>(`/projects/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
+    onSettled: () => setRemoving(null),
+  });
+
+  // 카드 전체가 링크라 삭제 버튼 클릭이 상세 화면으로 이동하지 않게 막는다
+  function confirmRemove(e: React.MouseEvent, p: ProjectRow) {
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = window.confirm(
+      `'${p.title}' 프로젝트를 삭제할까요?\n\n`
+      + '캐스팅·구간·생성 기록·결과 영상·마스터와 스토리지 파일이 모두 지워지며 되돌릴 수 없습니다. (감사 로그는 남습니다)',
+    );
+    if (!ok) return;
+    setRemoving(p.id);
+    remove.mutate(p.id);
+  }
 
   const create = useMutation({
     mutationFn: () =>
@@ -51,6 +75,7 @@ export default function ProjectsPage() {
         config: {
           requiredMode: current.requiredMode,
           resolution: current.resolution,
+          aspectRatio: current.aspectRatio,
           ...(current.preferredModel ? { preferredModel: current.preferredModel } : {}),
         },
       }),
@@ -104,7 +129,7 @@ export default function ProjectsPage() {
         </form>
       </Card>
 
-      <ErrorBox error={error} />
+      <ErrorBox error={remove.error ?? error} />
 
       {isLoading ? (
         <Loading />
@@ -125,7 +150,18 @@ export default function ProjectsPage() {
                   {' · '}
                   {p.config?.preferredModel ?? '자동 선택'}
                 </div>
-                <div className="mt-1 text-xs text-neutral-400">{p.createdAt.slice(0, 10)}</div>
+                <div className="mt-1 flex items-end justify-between gap-2 text-xs text-neutral-400">
+                  <span>{p.createdAt.slice(0, 10)}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => confirmRemove(e, p)}
+                    disabled={removing === p.id}
+                    aria-label={`${p.title} 삭제`}
+                    className="shrink-0 rounded px-1.5 py-0.5 transition hover:bg-red-600 hover:text-white disabled:opacity-40"
+                  >
+                    {removing === p.id ? '삭제 중…' : '삭제'}
+                  </button>
+                </div>
               </Card>
             </Link>
           ))}

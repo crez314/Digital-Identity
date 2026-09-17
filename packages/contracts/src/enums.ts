@@ -22,6 +22,11 @@ export const AssetRejectReason = z.enum([
   'BODY_FACE_MISSING',  // 전신 정면 슬롯인데 얼굴이 없다 — 다른 부위 사진
   'DEACTIVATED',        // 사용자가 삭제했으나 프로파일 재현을 위해 보존 — 재검사 대상이 아니다
 ]);
+/**
+ * 출력 화면 비율 (§6.3). 미지정 시 16:9.
+ * 비율 파라미터를 받지 않는 제공자(kling 등)는 시작 이미지 비율을 따르며, 그 사실을 경고로 남긴다(§12.1).
+ */
+export const AspectRatio = z.enum(['16:9', '9:16']);
 export const EmbeddingKind = z.enum(['FACE', 'BODY']);
 export const ProfileStatus = z.enum(['BUILDING', 'ACTIVE', 'ARCHIVED', 'FAILED']);
 
@@ -71,6 +76,7 @@ export type AssetType = z.infer<typeof AssetType>;
 export type CaptureSlot = z.infer<typeof CaptureSlot>;
 export type AssetRejectReason = z.infer<typeof AssetRejectReason>;
 export type PromptReferenceKind = z.infer<typeof PromptReferenceKind>;
+export type AspectRatio = z.infer<typeof AspectRatio>;
 export type SegmentStatus = z.infer<typeof SegmentStatus>;
 export type FindingType = z.infer<typeof FindingType>;
 export type GenerationMode = z.infer<typeof GenerationMode>;

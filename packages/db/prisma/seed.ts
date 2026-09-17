@@ -161,7 +161,7 @@ async function main() {
       provider: 'EXTERNAL_API',
       endpoint: '/veo3.1/reference-to-video',
       // 레퍼런스 이미지 1~3장으로 신원을 조건화한다 — CREZ Identity conditioning의 실제 경로
-      capabilities: { maxDurationMs: 8000, maxPersons: 3, modes: ['reference'], maxResolution: 1080,
+      capabilities: { maxDurationMs: 8000, maxPersons: 3, modes: ['reference'], maxResolution: 1080, billable: true,
                       durations: [4, 6, 8], endpoint: '/veo3.1/reference-to-video',
                       pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
       costPerSecond: 0.4,
@@ -170,7 +170,7 @@ async function main() {
       code: 'higgsfield-veo31-i2v',
       provider: 'EXTERNAL_API',
       endpoint: '/veo3.1/image-to-video',
-      capabilities: { maxDurationMs: 8000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
+      capabilities: { maxDurationMs: 8000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
                       durations: [4, 6, 8], endpoint: '/veo3.1/image-to-video',
                       pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
       costPerSecond: 0.3,
@@ -179,7 +179,7 @@ async function main() {
       code: 'higgsfield-kling25-pro-i2v',
       provider: 'EXTERNAL_API',
       endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
                       durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
                       pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
       costPerSecond: 0.25,
@@ -188,30 +188,75 @@ async function main() {
       code: 'higgsfield-sora2-i2v',
       provider: 'EXTERNAL_API',
       endpoint: '/sora-2/image-to-video',
-      capabilities: { maxDurationMs: 12000, maxPersons: 1, modes: ['i2v'], maxResolution: 720,
+      capabilities: { maxDurationMs: 12000, maxPersons: 1, modes: ['i2v'], maxResolution: 720, billable: true,
                       durations: [4, 8, 12], endpoint: '/sora-2/image-to-video',
                       pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
       costPerSecond: 0.35,
     },
+    // 2026-09-16 계정 점검에서 실제로 호출된 kling 변형들 (모델 확인 단계를 통과해 값 검증까지 도달).
+    // i2v는 시작 이미지 1장이라 인물 1명만 가능하고 다중 인물 신원 조건화는 되지 않는다.
+    {
+      code: 'higgsfield-kling25-standard-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/kling-video/v2.5-turbo/standard/image-to-video',
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
+                      durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/standard/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.18,
+    },
+    {
+      code: 'higgsfield-kling21-pro-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/kling-video/v2.1/pro/image-to-video',
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
+                      durations: [5, 10], endpoint: '/kling-video/v2.1/pro/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.2,
+    },
+    {
+      code: 'higgsfield-kling21-standard-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/kling-video/v2.1/standard/image-to-video',
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
+                      durations: [5, 10], endpoint: '/kling-video/v2.1/standard/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.12,
+    },
+    {
+      code: 'higgsfield-kling21-master-i2v',
+      provider: 'EXTERNAL_API',
+      endpoint: '/kling-video/v2.1/master/image-to-video',
+      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
+                      durations: [5, 10], endpoint: '/kling-video/v2.1/master/image-to-video',
+                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
+      costPerSecond: 0.3,
+    },
   ];
+  // 계정에서 실제로 호출되는 모델만 ACTIVE로 둔다 (2026-09-16 확인).
+  // veo3.1·sora2 계열은 model_not_found·model_disabled라, 지정하면 생성이 매번 실패한다.
+  // 접근이 열리면 여기에 code를 넣거나 PATCH /models/{code}/status 로 켠다.
+  const HF_ACTIVE = new Set([
+    'higgsfield-kling25-pro-i2v', 'higgsfield-kling25-standard-i2v',
+    'higgsfield-kling21-pro-i2v', 'higgsfield-kling21-standard-i2v', 'higgsfield-kling21-master-i2v',
+  ]);
   for (const m of higgsfield) {
+    const status = HF_ACTIVE.has(m.code) ? 'ACTIVE' : 'DISABLED';
     await prisma.aiModel.upsert({
       where: { code: m.code },
-      update: { capabilities: m.capabilities as never, endpoint: m.endpoint, costPerSecond: m.costPerSecond },
-      // 자격증명이 없으면 제출이 실패하므로 기본은 DISABLED로 둔다.
-      // 키를 넣고 PATCH /models/{code}/status 로 ACTIVE 전환한다.
-      create: { ...m, capabilities: m.capabilities as never, status: 'DISABLED', metrics: {} } as never,
+      update: { capabilities: m.capabilities as never, endpoint: m.endpoint, costPerSecond: m.costPerSecond, status },
+      create: { ...m, capabilities: m.capabilities as never, status, metrics: {} } as never,
     });
   }
 
   // ── §10 QC ruleset v1 — 초기 가중치는 기획 초안 제안값 ──
+  // v2가 활성이므로 v1은 비활성으로 남긴다(이력 재현용).
   await prisma.qcRuleset.upsert({
     where: { version: 'qc-v1' },
-    update: {},
+    update: { isActive: false },
     create: {
       version: 'qc-v1',
-      isActive: true,
-      note: '기획 초안 제안 가중치 (Face 45 / Body 20 / Temporal 20 / Binding 10 / Motion 5). Phase 2 검증셋으로 재조정 예정.',
+      isActive: false,
+      note: '기획 초안 제안 가중치 (Face 45 / Body 20 / Temporal 20 / Binding 10 / Motion 5). 실사 검증으로 qc-v2에 자리를 넘김.',
       weights: { face: 0.45, body: 0.2, temporal: 0.2, binding: 0.1, motion: 0.05 },
       thresholds: {
         perIdentityMin: 0.85,      // §20 Multi-Person 목표
@@ -225,6 +270,44 @@ async function main() {
         flickerZScore: 2.5,
         trackLostMinDurationSec: 0.5,
         minFrameQuality: 0.35,
+        assignMinSimilarity: 0.35,
+      },
+    },
+  });
+
+  // ── §10 QC ruleset v2 — 실사 생성 실측으로 재보정한 합격선 ──
+  //
+  // v1의 0.85/0.9는 mock 응답(얼굴·시간 일관성 0.93대)에 맞춰진 값이라 실제 생성물은 넘을 수 없었다.
+  // 2026-09-16 kling v2.5 turbo pro 실측(5초, 캐스트 1명):
+  //   · 인물이 끝까지 유지된 영상 : 얼굴 0.711 / 신체 0.761 / 시간 0.511 / binding 0.911 → 종합 0.700
+  //   · 1.9초에 인물이 교체된 영상 : 얼굴 0.643 / 시간 0.386 / binding 0.372          → 종합 0.53 부근
+  // 두 사례를 가르는 신호는 binding(인물이 화면에 남아 있는 비율)이며, 그 사이를 자르는 값으로 잡았다.
+  //
+  // 표본 2건짜리 잠정값이다. 검증셋이 쌓이면 qc-v3로 다시 올린다 — 임계값을 고칠 때는
+  // 행을 새로 만들고 활성만 옮긴다(qc_run.ruleset_version으로 과거 판정을 재현해야 하므로 덮어쓰지 않는다).
+  await prisma.qcRuleset.upsert({
+    where: { version: 'qc-v2' },
+    update: { isActive: true },
+    create: {
+      version: 'qc-v2',
+      isActive: true,
+      note: '실사 생성 2건 실측 기반 잠정 합격선 (구간 0.62 / 종합 0.65). 가중치는 v1 유지.',
+      weights: { face: 0.45, body: 0.2, temporal: 0.2, binding: 0.1, motion: 0.05 },
+      thresholds: {
+        perIdentityMin: 0.62,
+        maxSpread: 0.12,
+        overallMin: 0.65,
+        driftDropRatio: 0.12,
+        driftMinDurationSec: 1.0,
+        blendMargin: 0.05,
+        blendMinDurationSec: 0.6,
+        swapMinDurationSec: 0.8,
+        flickerZScore: 2.5,
+        trackLostMinDurationSec: 0.5,
+        minFrameQuality: 0.35,
+        // §9.1 τ_assign — 이 값을 넘지 못한 track은 캐스트 인물이 아니다.
+        // 넘기지 않으면 화면의 다른 사람 track까지 캐스트에 묶여 지표가 망가진다.
+        assignMinSimilarity: 0.35,
       },
     },
   });

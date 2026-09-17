@@ -13,6 +13,7 @@ export const TH: QcThresholds = {
   flickerZScore: 2.5,
   trackLostMinDurationSec: 0.5,
   minFrameQuality: 0.35,
+  assignMinSimilarity: 0.35,
 };
 
 /** 200ms 간격 시계열 생성기 */

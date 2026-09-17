@@ -112,6 +112,7 @@ def identity_assign(req: IdentityAssignRequest) -> IdentityAssignResponse:
 def qc_score(req: QcScoreRequest) -> QcScoreResponse:
     result = qc_svc.score(
         req.videoKey, [r.model_dump() for r in req.references], req.sourceTracksKey, req.sampleFps,
+        assign_min_similarity=req.assignMinSimilarity,
     )
     return QcScoreResponse(**result)
 

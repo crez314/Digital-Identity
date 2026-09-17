@@ -1926,6 +1926,10 @@
               "type": "number",
               "default": 5
             },
+            "assignMinSimilarity": {
+              "type": "number",
+              "default": 0.35
+            },
             "traceId": {
               "type": "string"
             }
@@ -2674,6 +2678,10 @@
             },
             "minFrameQuality": {
               "type": "number"
+            },
+            "assignMinSimilarity": {
+              "type": "number",
+              "default": 0.35
             }
           },
           "required": [

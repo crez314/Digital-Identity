@@ -98,6 +98,7 @@ def score(
     references: list[dict],
     source_tracks_key: str | None,
     sample_fps: float = 5,
+    assign_min_similarity: float = 0.35,
 ) -> dict:
     """
     생성 결과를 독립적으로 다시 트래킹하고(§9.2), track 단위로 identity를 할당한 뒤
@@ -105,6 +106,13 @@ def score(
 
     references[].faceCentroid는 필수, bodyCentroid는 선택이다. 신체 기준이 없으면
     신체 지표는 None으로 반환하고, 상위 계층이 가중치를 재분배한다.
+
+    assign_min_similarity는 호출자(ruleset)가 정하는 τ_assign이다. assign()은 설계상
+    확정 판정을 하지 않고 Hungarian 최적 짝만 돌려주며, 짝을 못 찾은 track에는 가장
+    가까운 인물을 붙여 준다 — 캐스트가 1명이고 화면에 여러 사람이 나오면 백댄서 track까지
+    전부 그 1명에게 붙는다. 그대로 쓰면 남의 얼굴이 지표에 섞여 유사도가 내려가고,
+    다른 사람 얼굴끼리의 차이가 프레임 간 변화량으로 잡혀 시간 일관성이 무너진다.
+    (2026-09-16 실측: track 10개 전부 1명에게 배정 → 얼굴 0.388, 시간 일관성 0.19)
     """
     if models.is_mock():
         return _mock_score(video_key, references, sample_fps)
@@ -125,11 +133,25 @@ def score(
 
     assignment = assign_tracks(tracks, references)
     track_to_identity = {
-        a["trackIndex"]: a["identityId"] for a in assignment["assignments"] if a["identityId"]
+        a["trackIndex"]: a["identityId"]
+        for a in assignment["assignments"]
+        if a["identityId"] and float(a.get("similarity") or 0.0) >= assign_min_similarity
     }
+    rejected = [
+        {"trackIndex": a["trackIndex"], "similarity": float(a.get("similarity") or 0.0)}
+        for a in assignment["assignments"]
+        if a["identityId"] and float(a.get("similarity") or 0.0) < assign_min_similarity
+    ]
+    if rejected:
+        log.info(
+            "qc: τ_assign(%.2f) 미만 track %d개를 캐스트에서 제외했다 — %s",
+            assign_min_similarity, len(rejected), rejected,
+        )
 
     per_identity = []
     total_span = max(1, analysis["durationMs"])
+    # 샘플 간격 2배까지만 "인접 프레임"으로 본다(5fps 샘플링이면 400ms)
+    max_adjacent_gap_ms = int(2000.0 / max(sample_fps, 0.1))
 
     for identity_id in ref_ids:
         my_tracks = [t for t in tracks if track_to_identity.get(t["trackIndex"]) == identity_id]
@@ -145,10 +167,21 @@ def score(
         assigned_ms = 0
         body_ref = ref_body.get(identity_id)
 
-        for t in my_tracks:
+        # track이 끊겼다 다시 잡히면 그 사이는 인접 프레임이 아니다. track마다 이전 프레임을
+        # 비워서, 끊긴 자리의 변화량이 시간 일관성에 섞이지 않게 한다(§10.1).
+        for t in sorted(my_tracks, key=lambda x: x["startMs"]):
+            prev_face = None
+            prev_body = None
+            prev_ms: int | None = None
             assigned_ms += max(0, t["endMs"] - t["startMs"])
-            for f in t["frames"]:
+            for f in sorted(t["frames"], key=lambda x: int(x["ms"])):
                 total += 1
+                # 같은 track 안에서도 얼굴을 못 잡은 구간이 있어 프레임이 띄엄띄엄 있다.
+                # 시간이 벌어진 두 프레임의 차이를 "프레임 간 변화량"으로 쓰면 그냥 움직인 것을
+                # 신원이 튄 것으로 읽는다. 샘플 간격 2배를 넘으면 인접으로 보지 않는다.
+                ms = int(f["ms"])
+                adjacent = prev_ms is not None and (ms - prev_ms) <= max_adjacent_gap_ms
+                prev_ms = ms
                 quality = float(f.get("faceQuality") or 0.0)
                 occlusion = float(f.get("occlusion") or 0.0)
 
@@ -169,7 +202,7 @@ def score(
                     runner_id, runner_sim = (scored[1] if len(scored) > 1 else (None, None))
                     face_sim = next((s for rid, s in scored if rid == identity_id), 0.0)
 
-                    if prev_face is not None:
+                    if prev_face is not None and adjacent:
                         face_delta = float(1.0 - cosine(vec, prev_face))
                         face_deltas.append(face_delta)
                     prev_face = vec
@@ -184,14 +217,14 @@ def score(
                     bvec = np.array(bv, dtype=np.float32)
                     body_sim = cosine(bvec, body_ref)
                     body_sims.append(body_sim)
-                    if prev_body is not None:
+                    if prev_body is not None and adjacent:
                         body_delta = float(1.0 - cosine(bvec, prev_body))
                         body_deltas.append(body_delta)
                     prev_body = bvec
                 elif bv:
                     # 신체 기준이 없어도 프레임 간 변화량은 의미가 있다
                     bvec = np.array(bv, dtype=np.float32)
-                    if prev_body is not None:
+                    if prev_body is not None and adjacent:
                         body_delta = float(1.0 - cosine(bvec, prev_body))
                         body_deltas.append(body_delta)
                     prev_body = bvec

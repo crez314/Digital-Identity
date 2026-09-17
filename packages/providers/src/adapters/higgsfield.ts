@@ -1,4 +1,7 @@
-import { CrezError, ErrorCode, logger } from '@crez/shared';
+import {
+  CrezError, ErrorCode, logger, IDENTITY_NEGATIVE_PROMPT, promptAdherenceFromConditioning,
+  type ErrorCodeValue,
+} from '@crez/shared';
 import type {
   FetchResult, GenerationProvider, GenerationRequest, ImagePlan, ModelDescriptor, PollResult, SubmitResult,
 } from '../types';
@@ -46,6 +49,25 @@ export interface HiggsfieldConfig {
   keyId?: string;
   keySecret?: string;
   timeoutMs?: number;
+}
+
+/**
+ * 제공자 오류를 CREZ 에러 코드로 옮긴다.
+ *
+ * v1.3까지는 재시도 대상이 아닌 4xx를 전부 CREZ-GEN-003(콘텐츠 정책)으로 기록했다. 그래서
+ * `404 model_not_found`(계정에 그 모델이 없음)가 "부적절한 콘텐츠로 거부됨"으로 남아 원인을 잘못 짚게 했다 —
+ * 2026-09-16 veo3.1 reference-to-video 실패가 실제로 그렇게 기록됐다.
+ * 상태 코드는 같은 사유에도 404·503으로 갈리므로 detail 문자열로 판정한다.
+ */
+export function classifyHiggsfieldError(detail: string): ErrorCodeValue {
+  const d = detail.toLowerCase();
+  if (d.includes('model_not_found') || d.includes('model_disabled')) return ErrorCode.GEN_NO_CAPABLE_MODEL;
+  if (d.includes('credit') || d.includes('quota') || d.includes('balance')) return ErrorCode.GEN_QUOTA_EXCEEDED;
+  if (d.includes('nsfw') || d.includes('content_policy') || d.includes('moderation') || d.includes('safety')) {
+    return ErrorCode.GEN_CONTENT_POLICY;
+  }
+  // 402(결제 필요)·429(속도 제한)·5xx·스키마 오류는 전부 제공자 오류로 둔다
+  return ErrorCode.GEN_PROVIDER_ERROR;
 }
 
 /** 스펙상 duration은 임의 값이 아니라 고정 enum이다. 경로별 허용 목록. */
@@ -121,10 +143,8 @@ export class HiggsfieldProvider implements GenerationProvider {
       if (!res.ok) {
         // 스펙의 에러 본문은 { detail: string }
         const detail = (body as { detail?: string }).detail ?? text.slice(0, 500);
-        // 402/429는 일시적 → 재시도 대상, 4xx 나머지는 요청 자체가 잘못된 것
-        const retryable = res.status === 429 || res.status === 402 || res.status >= 500;
         throw new CrezError(
-          retryable ? ErrorCode.GEN_PROVIDER_ERROR : ErrorCode.GEN_CONTENT_POLICY,
+          classifyHiggsfieldError(detail),
           `higgsfield ${res.status}: ${detail}`,
           { status: res.status, detail, path },
           502,
@@ -165,7 +185,7 @@ export class HiggsfieldProvider implements GenerationProvider {
         'higgsfield: 세그먼트 길이를 제공자 허용 길이로 스냅했다',
       );
     }
-    const aspect = req.resolution >= 1080 ? '16:9' : '16:9';
+    const aspect = req.aspectRatio;
     const prompt = req.prompt ?? '';
 
     // reference-to-video — Identity conditioning 경로
@@ -191,7 +211,17 @@ export class HiggsfieldProvider implements GenerationProvider {
       body.generate_audio = false;
     } else if (ep.includes('kling')) {
       body.duration = duration;                           // kling은 정수
-      body.cfg_scale = req.conditioningStrength;          // 프롬프트 준수 강도
+      // 스펙상 cfg_scale은 "프롬프트 준수 강도"(0~1, 기본 0.5)다. 값이 높을수록 텍스트를 따라가며
+      // 시작 이미지에서 멀어지므로, 신원 조건화 강도를 뒤집어 넘긴다 (prompt-identity.ts).
+      body.cfg_scale = promptAdherenceFromConditioning(req.conditioningStrength);
+      // 스펙에 negative_prompt가 있다. 인물 교체·컷 전환을 여기서 한 번 더 막는다.
+      body.negative_prompt = IDENTITY_NEGATIVE_PROMPT;
+      // kling 스펙에는 화면 비율 파라미터가 없다 — 출력이 시작 이미지 비율을 그대로 따른다.
+      // 얼굴 위주 레퍼런스를 쓰면 정사각형에 가까운 영상이 나오므로 조용히 넘기지 않는다.
+      logger.warn(
+        { segmentId: req.segmentId, endpoint: ep, requested: req.aspectRatio },
+        'higgsfield: 이 모델은 화면 비율을 지정할 수 없다 — 시작 이미지 비율을 따른다',
+      );
     } else {
       body.duration = duration;
       body.resolution = resolutionValue(ep, req.resolution);

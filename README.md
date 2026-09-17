@@ -196,6 +196,21 @@ curl -X PATCH -H "x-dev-user: admin@hicrez.com" -H "content-type: application/js
 | `higgsfield-kling25-pro-i2v` | `/kling-video/v2.5-turbo/pro/image-to-video` | `i2v` | 5·10초 |
 | `higgsfield-sora2-i2v` | `/sora-2/image-to-video` | `i2v` | 최대 12초 |
 
+**계정에서 실제로 열리는 모델은 다르다.** 2026-09-16 점검 기준 veo3.1 계열과 sora2는
+`model_not_found`·`model_disabled`라 시드에서 DISABLED로 둔다. 호출되는 것은 kling 계열
+(`/kling-video/v2.5-turbo/{pro,standard}/image-to-video`, `/kling-video/v2.1/{master,pro,standard}/image-to-video`)뿐이며
+이들만 ACTIVE다. veo3.1 접근이 열리면 `PATCH /models/{code}/status`로 켠다.
+`reference` 방식(레퍼런스 1~3장으로 신원 조건화)은 veo3.1에만 있으므로, kling만으로는
+시작 이미지 1장짜리 i2v만 가능하다.
+
+화면 비율은 프로젝트 설정 `config.aspectRatio`(`16:9` 기본, `9:16` 선택)로 정한다.
+kling은 비율 파라미터가 없어 시작 이미지 비율을 그대로 따르며 그 사실이 경고 로그로 남는다.
+
+QC가 실패해도 **과금 모델은 자동 재생성하지 않는다**(`PAID_AUTO_REGEN_LIMIT`, 기본 0).
+구간은 `MANUAL_REVIEW`로 올라가고 운영자가 `POST /segments/{id}/regenerate`로만 다시 돌린다.
+제출한 요청의 취소는 워커가 제공자에 전달하지만, 이미 진행 중이면 제공자가 거부할 수 있다 —
+그 경우 과금은 막지 못하고 감사 로그에 `PROVIDER_CANCEL_REFUSED`로 남는다.
+
 연동 시 주의할 제약이 셋 있다.
 
 - **pose-guided 모드가 없다.** Higgsfield는 안무 궤적을 직접 조건화하는 엔드포인트를

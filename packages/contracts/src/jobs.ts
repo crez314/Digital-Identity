@@ -89,6 +89,8 @@ export const JOB_NAME = {
   SOURCE_ANALYZE: 'source.analyze',
   GENERATION_SUBMIT: 'generation.submit',
   GENERATION_POLL: 'generation.poll',
+  /** 제공자에 제출된 생성 취소 — 로컬 상태만 바꾸면 외부 생성이 계속돼 과금된다 (§12.1) */
+  GENERATION_CANCEL: 'generation.cancel',
   QC_RUN: 'qc.run',
   REGENERATION_PLAN: 'regeneration.plan',
   MASTER_BUILD: 'master.build',

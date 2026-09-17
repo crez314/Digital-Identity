@@ -61,7 +61,16 @@ export class GenerationService {
       orderBy: { segmentIndex: 'asc' },
     });
     if (segments.length === 0) {
-      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '생성할 세그먼트가 없습니다', null, 409);
+      // 어떤 상태라서 빠졌는지 알려준다 — "없습니다"만으로는 무엇을 해야 할지 알 수 없다
+      const byStatus = await this.prisma.segment.groupBy({ by: ['status'], where: { projectId }, _count: true });
+      const summary = byStatus.map((g) => `${g.status} ${g._count}개`).join(', ') || '정의된 구간 없음';
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        `생성 대기(PENDING)·실패(FAILED) 구간이 없습니다 — 현재 ${summary}. `
+        + 'MANUAL_REVIEW 구간은 QC 화면에서 재생성을 요청하거나 승인하고, 되돌리려면 구간 초기화를 쓰세요.',
+        { statuses: Object.fromEntries(byStatus.map((g) => [g.status, g._count])) },
+        409,
+      );
     }
 
     const submitted: Array<{ segmentId: string; jobId: string; attempt: number }> = [];
@@ -71,9 +80,13 @@ export class GenerationService {
         // 한도를 넘긴 세그먼트는 자동 실행 대상이 아니다 — 수동 재생성 경로로만 처리한다.
         continue;
       }
-      const attempt = seg.attemptCount + 1;
+      // 기록상 시도 번호는 job 이력에서 이어 붙인다. generation_job은 (segment_id, attempt)가 유일하므로,
+      // 구간 초기화로 attemptCount가 0으로 돌아간 뒤 1부터 다시 쓰면 저장이 실패해 구간이 GENERATING에 멈춘다.
+      // 한도 판정은 segment.attemptCount(초기화 가능)로, 기록·스토리지 경로는 job attempt로 나눈다.
+      const last = await this.prisma.generationJob.aggregate({ _max: { attempt: true }, where: { segmentId: seg.id } });
+      const attempt = Math.max(last._max.attempt ?? 0, seg.attemptCount) + 1;
       await this.prisma.segment.update({
-        where: { id: seg.id }, data: { status: 'GENERATING', attemptCount: attempt },
+        where: { id: seg.id }, data: { status: 'GENERATING', attemptCount: seg.attemptCount + 1 },
       });
       const jobId = await this.queue.add(
         QUEUE.GENERATION, JOB_NAME.GENERATION_SUBMIT,
@@ -81,6 +94,19 @@ export class GenerationService {
         { priority: input.priority ?? 5 },
       );
       submitted.push({ segmentId: seg.id, jobId, attempt });
+    }
+
+    // 고른 구간이 전부 걸러졌으면 조용히 빈 결과를 돌려주지 않는다 — 눌렀는데 아무 일도 없는 것처럼 보인다
+    if (submitted.length === 0) {
+      const exhausted = segments.filter((s) => s.attemptCount >= MAX_GENERATION_ATTEMPT).length;
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        exhausted > 0
+          ? `구간 ${exhausted}개가 시도 한도 ${MAX_GENERATION_ATTEMPT}회를 모두 썼습니다 — 원인을 고친 뒤 구간 초기화로 되돌리거나 QC 화면에서 재생성을 요청하세요`
+          : '생성·QC가 진행 중이라 새로 제출할 구간이 없습니다',
+        { exhausted, selected: segments.length },
+        409,
+      );
     }
 
     if (project.status !== 'RUNNING') {
@@ -111,11 +137,34 @@ export class GenerationService {
     const project = await this.prisma.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
     if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
 
+    // 제공자에 이미 제출된 작업은 로컬 상태만 바꾼다고 멈추지 않는다 — 계속 생성되고 과금된다(§12.1).
+    // 취소 요청은 외부 API 호출이라 워커가 한다(§2.2).
+    const inFlight = await this.prisma.generationJob.findMany({
+      where: {
+        status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] },
+        segment: { projectId },
+        providerJobId: { not: null },
+      },
+      select: { id: true, segmentId: true, providerJobId: true },
+    });
+
     const removed = await this.queue.cancelByProject(projectId);
     const { count } = await this.prisma.generationJob.updateMany({
       where: { status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] }, segment: { projectId } },
       data: { status: 'CANCELLED', finishedAt: new Date() },
     });
+
+    // 큐를 비운 뒤에 넣어야 방금 넣은 취소 작업이 함께 지워지지 않는다
+    for (const job of inFlight) {
+      await this.queue.add(
+        QUEUE.GENERATION, JOB_NAME.GENERATION_CANCEL,
+        {
+          traceId, orgId: user.orgId, projectId, segmentId: job.segmentId,
+          generationJobId: job.id, providerJobId: job.providerJobId,
+        },
+        { priority: 1 },
+      );
+    }
     await this.prisma.segment.updateMany({
       where: { projectId, status: 'GENERATING' }, data: { status: 'PENDING' },
     });
@@ -126,13 +175,21 @@ export class GenerationService {
 
     await this.audit.record({
       orgId: user.orgId, actorId: user.id, action: 'PROJECT_GENERATED', projectId,
-      payload: { event: 'CANCELLED', removedQueueJobs: removed, cancelledJobs: count, revertedToReady: reverted }, traceId,
+      payload: {
+        event: 'CANCELLED', removedQueueJobs: removed, cancelledJobs: count,
+        providerCancelRequested: inFlight.length, revertedToReady: reverted,
+      },
+      traceId,
     });
     await this.events.publish({
       type: 'PROJECT_STATUS', projectId, payload: { status: 'CANCELLED', cancelledJobs: count },
       at: new Date().toISOString(), traceId,
     });
-    return { removedQueueJobs: removed, cancelledJobs: count, revertedToReady: reverted };
+    // providerCancelRequested는 "요청했다"는 뜻이다 — 제공자가 거부하면 그 생성은 끝까지 가고 과금된다
+    return {
+      removedQueueJobs: removed, cancelledJobs: count,
+      providerCancelRequested: inFlight.length, revertedToReady: reverted,
+    };
   }
 
   private async revertToReadyIfNothingGenerated(projectId: string, status: string): Promise<boolean> {

@@ -165,6 +165,16 @@ export class ProjectController {
     return this.svc.updateSegmentPrompt(user, id, segmentId, body, traceId);
   }
 
+  @Post(':id/segments/:segmentId/reset')
+  @RequirePermission('PROJECT_RUN')
+  @ApiOperation({ summary: '실패·검토 대기 구간을 다시 생성할 수 있게 되돌린다. 시도 횟수를 0으로 초기화하며 생성 기록은 남는다' })
+  resetSegment(
+    @CurrentUser() user: AuthUser, @Param('id') id: string, @Param('segmentId') segmentId: string,
+    @TraceId() traceId: string,
+  ) {
+    return this.svc.resetSegment(user, id, segmentId, traceId);
+  }
+
   @Post(':id/segments/:segmentId/references/upload-url')
   @RequirePermission('PROJECT_RUN')
   @ApiOperation({ summary: '프롬프트 참고 이미지(배경·의상·헤어) 업로드 URL 발급' })

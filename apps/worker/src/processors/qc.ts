@@ -9,6 +9,7 @@ import {
 } from '@crez/shared';
 import { JOB_NAME, QcThresholds, ScoreWeights, type QcJobPayload } from '@crez/contracts';
 import { ml } from '../lib/ml';
+import { autoRegenDecision, isBillable } from '../lib/regen-policy';
 import { storage } from '../lib/storage';
 import { emit } from '../lib/events';
 import { queues } from '../lib/queues';
@@ -27,7 +28,10 @@ export async function qcProcessor(job: Job): Promise<unknown> {
 
   const output = await prisma.generationOutput.findUnique({
     where: { id: data.outputId },
-    include: { job: { include: { segment: { include: { project: { include: { cast: true, sourceVideos: true } } } } } } },
+    include: {
+      // 모델까지 함께 읽는다 — 과금 제공자는 자동 재생성 한도가 다르다(§11)
+      job: { include: { model: true, segment: { include: { project: { include: { cast: true, sourceVideos: true } } } } } },
+    },
   });
   if (!output) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '결과물 없음', data, 404);
 
@@ -68,6 +72,9 @@ export async function qcProcessor(job: Job): Promise<unknown> {
         references,
         sourceTracksKey: sourceVideo?.tracksKey ?? null,
         sampleFps: Number(process.env.QC_SAMPLE_FPS ?? 5),
+        // τ_assign은 정책이라 ruleset에서 온다 — crez-ml은 받아서 적용만 한다(§7, §9.1).
+        // 이 값을 넘기지 않으면 화면에 있는 다른 사람 track까지 캐스트 인물로 묶여 지표가 망가진다.
+        assignMinSimilarity: thresholds.assignMinSimilarity,
         traceId: data.traceId,
       }),
       ml.detectArtifacts({
@@ -188,8 +195,14 @@ export async function qcProcessor(job: Job): Promise<unknown> {
     }
 
     // QC 실패 → 재생성 큐 또는 MANUAL_REVIEW (§5.1)
+    // 과금 제공자는 자동 재생성이 곧 자동 과금이므로 한도가 따로 있다 (§11, 기본 0회)
     const regenCount = await prisma.regenerationTask.count({ where: { segmentId: segment.id } });
-    if (segment.attemptCount >= MAX_REGEN || regenCount >= MAX_REGEN) {
+    const decision = autoRegenDecision({
+      billable: isBillable(output.job.model.capabilities),
+      attemptCount: segment.attemptCount,
+      regenCount,
+    });
+    if (!decision.allowed) {
       // 승격 전에 직전 재생성의 결과를 분류해 둔다. 여기서 빠뜨리면 outcome이 영원히
       // null로 남아 §11 전략별 통계와 §20 재생성 성공률 KPI가 어긋난다.
       await closeOpenRegenTask(segment.id, verdict.overallScore);
@@ -199,10 +212,16 @@ export async function qcProcessor(job: Job): Promise<unknown> {
         payload: {
           status: 'MANUAL_REVIEW', score: verdict.overallScore, qcRunId: qcRun.id,
           reasons: verdict.reasons, code: ErrorCode.QC_REGEN_LIMIT,
+          escalationReason: decision.reason, limit: decision.limit, model: output.job.model.code,
         },
         traceId: data.traceId,
       });
-      log.warn({ score: verdict.overallScore, reasons: verdict.reasons }, 'QC failed — escalated to MANUAL_REVIEW');
+      log.warn(
+        { score: verdict.overallScore, reasons: verdict.reasons, escalationReason: decision.reason, limit: decision.limit },
+        decision.reason === 'PAID_PROVIDER_LIMIT'
+          ? 'QC failed — 과금 제공자라 자동 재생성하지 않고 MANUAL_REVIEW로 올린다'
+          : 'QC failed — escalated to MANUAL_REVIEW',
+      );
       return { qcRunId: qcRun.id, passed: false, escalated: true };
     }
 

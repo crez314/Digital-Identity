@@ -84,6 +84,7 @@ export class ExternalHttpProvider implements GenerationProvider {
       },
       // 범용 HTTP 제공자는 스토리지 키로 받으므로 이미지 수 제한 없이 모두 넘긴다
       promptReferences: req.attachments.map((a) => ({ kind: a.kind, slot: a.slotIndex, referenceKey: a.storageKey })),
+      aspectRatio: req.aspectRatio,
       sourceVideoKey: req.sourceVideoKey,
       poseTracksKey: req.sourceTracksKey,
       callbackTraceId: req.traceId,

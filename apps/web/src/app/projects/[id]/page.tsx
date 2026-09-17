@@ -118,6 +118,9 @@ interface CastRow {
   roleLabel: string | null;
 }
 
+/** @crez/shared MAX_GENERATION_ATTEMPT와 같은 값 (웹은 shared를 직접 쓰지 않는다) */
+const MAX_ATTEMPT = 3;
+
 interface Dashboard {
   counts: Record<string, number>;
   blockers: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number; attemptCount: number }>;
@@ -145,6 +148,14 @@ export default function ProjectDetail() {
   });
 
   const generate = useMutation({ mutationFn: () => post(`/projects/${id}/generate`, {}) });
+  // 시도 한도를 다 쓴 구간은 재생성 사다리로도 못 되살린다 — 원인을 고친 뒤 되돌리는 경로
+  const resetSegment = useMutation({
+    mutationFn: (segmentId: string) => post(`/projects/${id}/segments/${segmentId}/reset`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['project-segments', id] });
+      qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
+    },
+  });
   const cancel = useMutation({ mutationFn: () => post(`/projects/${id}/cancel`) });
   const master = useMutation({ mutationFn: () => post(`/projects/${id}/master`, { normalizeColor: true, normalizeTiming: true }) });
   const remove = useMutation({
@@ -162,6 +173,10 @@ export default function ProjectDetail() {
   const config = project.data?.config ?? {};
   // 삭제는 실제로 도는 작업이 있을 때만 막는다(api와 같은 기준)
   const inFlight = (dashboard.data?.counts.GENERATING ?? 0) + (dashboard.data?.counts.QC ?? 0);
+  // 생성 실행이 실제로 집어가는 구간 — 대기·실패이면서 시도 한도가 남은 것 (api generate와 같은 기준)
+  const generatable = (segments.data ?? []).filter(
+    (s) => ['PENDING', 'FAILED'].includes(s.status) && s.attemptCount < MAX_ATTEMPT,
+  ).length;
   // 생성 전 단계에서만 준비 화면을 보여준다. 이후에는 캐스팅·구간을 바꿀 수 없다.
   const preparing = status === 'DRAFT' || status === 'READY';
 
@@ -190,7 +205,7 @@ export default function ProjectDetail() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {status === 'DRAFT' ? <span className="text-xs text-amber-500">생성 준비를 먼저 완료하세요</span> : null}
-          <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT'}>생성 실행</Button>
+          <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT' || generatable === 0}>생성 실행</Button>
           <Button variant="secondary" onClick={() => cancel.mutate()}>취소</Button>
           <Button variant="secondary" onClick={() => master.mutate()}>마스터 생성</Button>
           <Button variant="danger" onClick={confirmRemove} disabled={remove.isPending || inFlight > 0}>
@@ -200,6 +215,10 @@ export default function ProjectDetail() {
       </div>
       {inFlight > 0 ? (
         <p className="-mt-4 text-right text-xs text-neutral-500">생성·QC가 진행 중인 구간 {inFlight}개 — 삭제하려면 먼저 취소하세요</p>
+      ) : generatable === 0 && (segments.data?.length ?? 0) > 0 ? (
+        <p className="-mt-4 text-right text-xs text-neutral-500">
+          생성 대기 구간이 없습니다 — 아래 구간 목록의 &lsquo;초기화&rsquo;로 되돌리거나 QC 화면에서 재생성을 요청하세요
+        </p>
       ) : null}
 
       <ErrorBox error={generate.error ?? cancel.error ?? master.error ?? remove.error} />
@@ -250,11 +269,24 @@ export default function ProjectDetail() {
                     <td className="pt-3 tabular-nums">{s.attemptCount}</td>
                     <td className="pt-3 tabular-nums">{score(s.latestScore)}</td>
                     <td className="pt-3 text-right">
-                      {s.latestQcRunId ? (
-                        <Link href={`/qc-runs/${s.latestQcRunId}`} className="text-xs text-blue-600 hover:underline">
-                          QC 보기
-                        </Link>
-                      ) : null}
+                      <div className="flex items-center justify-end gap-2">
+                        {['FAILED', 'MANUAL_REVIEW'].includes(s.status) ? (
+                          <button
+                            type="button"
+                            onClick={() => resetSegment.mutate(s.id)}
+                            disabled={resetSegment.isPending}
+                            className="text-xs text-neutral-500 hover:underline disabled:opacity-40"
+                            title="시도 횟수를 0으로 되돌려 다시 생성할 수 있게 합니다 (생성 기록은 남습니다)"
+                          >
+                            초기화
+                          </button>
+                        ) : null}
+                        {s.latestQcRunId ? (
+                          <Link href={`/qc-runs/${s.latestQcRunId}`} className="text-xs text-blue-600 hover:underline">
+                            QC 보기
+                          </Link>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                   <tr>

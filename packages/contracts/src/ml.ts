@@ -196,6 +196,11 @@ export const QcScoreRequest = z.object({
   /** 소스 안무 keypoint 시계열 키 — motion_consistency(DTW) 산출용. 없으면 motion=null */
   sourceTracksKey: z.string().nullable().optional(),
   sampleFps: z.number().default(5),
+  /**
+   * §9.1 τ_assign — 이 유사도를 넘지 못한 track은 캐스트 인물로 보지 않는다.
+   * 정책은 ruleset이 정하고(qc_ruleset.thresholds.assignMinSimilarity), crez-ml은 그대로 적용만 한다(§7).
+   */
+  assignMinSimilarity: z.number().default(0.35),
   traceId: z.string().optional(),
 });
 

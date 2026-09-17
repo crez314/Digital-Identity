@@ -97,6 +97,8 @@ export interface GenerationRequest {
   }>;
   /** 프롬프트 참고 이미지(배경·의상·헤어). 인물 신원 레퍼런스와 함께 제공자 이미지 한도 안에서 배분된다 */
   attachments: PromptAttachment[];
+  /** 출력 화면 비율 (project.config.aspectRatio, 기본 16:9). 받지 않는 제공자는 무시하고 경고를 남긴다 */
+  aspectRatio: '16:9' | '9:16';
   /** pose-guided 모드용 소스 트랙 키 */
   sourceVideoKey: string | null;
   sourceTracksKey: string | null;

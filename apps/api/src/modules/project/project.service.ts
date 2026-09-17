@@ -588,6 +588,38 @@ export class ProjectService {
   }
 
   /**
+   * 실패·검토 대기 구간을 다시 생성할 수 있게 되돌린다 (§5.1).
+   *
+   * 시도 한도를 모두 쓴 구간은 재생성 사다리(§11)로도 되살릴 수 없다 — 제출 자체가 실패해 QC 결과가 없으면
+   * 전략을 정할 수 없기 때문이다. 원인이 설정 문제(예: 레퍼런스 공개 URL 미설정)였다면 구간만 되돌려
+   * 다시 돌릴 수 있어야 한다. 생성 기록(generation_job)과 감사 로그는 지우지 않는다.
+   */
+  async resetSegment(user: AuthUser, projectId: string, segmentId: string, traceId: string) {
+    await this.requireProject(user, projectId);
+    const segment = await this.prisma.segment.findFirst({ where: { id: segmentId, projectId } });
+    if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
+    if (['GENERATING', 'QC'].includes(segment.status)) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, `${segment.status} 중에는 초기화할 수 없습니다 — 먼저 취소하세요`, null, 409);
+    }
+    if (segment.acceptedOutputId) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '이미 승인된 구간입니다 — 초기화 대상이 아닙니다', null, 409);
+    }
+
+    await this.prisma.segment.update({
+      where: { id: segmentId }, data: { status: 'PENDING', attemptCount: 0 },
+    });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'PROJECT_GENERATED', projectId,
+      payload: {
+        event: 'SEGMENT_RESET', segmentId, segmentIndex: segment.segmentIndex,
+        from: segment.status, attemptCountBefore: segment.attemptCount,
+      },
+      traceId,
+    });
+    return { ok: true, segmentId, status: 'PENDING' as const };
+  }
+
+  /**
    * 세그먼트별 프롬프트 수정 (§6.3). 비우면 씬 프롬프트로 돌아간다.
    * 이미 제출된 생성에는 반영되지 않고 다음 시도(재생성 포함)부터 쓰인다 — 실제로 쓴 값은 job params에 남는다.
    */

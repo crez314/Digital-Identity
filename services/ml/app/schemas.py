@@ -200,6 +200,8 @@ class QcScoreRequest(BaseModel):
     references: list[QcReference] = Field(min_length=1)
     sourceTracksKey: str | None = None
     sampleFps: float = 5
+    # §9.1 τ_assign — 이 유사도 미만인 track은 캐스트 인물이 아니다(호출자가 ruleset 값을 넘긴다)
+    assignMinSimilarity: float = 0.35
     traceId: str | None = None
 
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  GenerationMode, MappingMethod, ProjectStatus, ProjectType, PromptReferenceKind, SegmentStatus,
+  AspectRatio, GenerationMode, MappingMethod, ProjectStatus, ProjectType, PromptReferenceKind, SegmentStatus,
 } from './enums';
 
 /** §6.3 Project / 생성 API DTO */
@@ -11,6 +11,8 @@ export const ProjectConfig = z.object({
   outputFormat: z.enum(['mp4', 'mov']).default('mp4'),
   style: z.record(z.unknown()).default({}),
   requiredMode: GenerationMode.default('pose-guided'),
+  /** 출력 화면 비율. 미지정 시 16:9 — 받지 않는 제공자는 시작 이미지 비율을 따른다(§12.1) */
+  aspectRatio: AspectRatio.default('16:9'),
   /**
    * 이 프로젝트에서 반드시 쓸 모델 code. 지정하면 라우터가 점수로 다른 모델(예: mock)을 고르지 않고,
    * 이 모델이 조건을 못 맞추면 조용히 대체하지 않고 생성이 실패한다. 비우면 점수 기준 자동 선택.
@@ -30,6 +32,7 @@ export const UpdateProjectRequest = z.object({
   config: z
     .object({
       requiredMode: GenerationMode.optional(),
+      aspectRatio: AspectRatio.optional(),
       resolution: z.enum(['720p', '1080p', '2160p']).optional(),
       /** null이면 자동 선택으로 되돌린다 */
       preferredModel: z.string().min(1).nullable().optional(),

@@ -6,8 +6,9 @@ import {
   type GenerationRequest, type ModelDescriptor, type PromptAttachment, type ReferenceAsset,
 } from '@crez/providers';
 import {
-  CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE, childLogger, storageKey,
+  CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE, childLogger, storageKey, withIdentityAnchor,
 } from '@crez/shared';
+import { inspectPrompt, summarizeRisks } from '@crez/engine';
 import { JOB_NAME, type GenerationJobPayload, type GenerationPollJob } from '@crez/contracts';
 import { emit } from '../lib/events';
 import { audit } from '../lib/audit';
@@ -26,6 +27,8 @@ export async function generationProcessor(job: Job): Promise<unknown> {
       return submit(job.data as GenerationJobPayload);
     case JOB_NAME.GENERATION_POLL:
       return poll(job.data as GenerationPollJob & { projectId: string; segmentId: string; orgId: string });
+    case JOB_NAME.GENERATION_CANCEL:
+      return cancelSubmission(job.data as CancelJob);
     default:
       throw new Error(`unknown generation job: ${job.name}`);
   }
@@ -98,7 +101,9 @@ async function submit(data: GenerationJobPayload) {
   if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트 없음', data, 404);
 
   const project = segment.project;
-  const config = project.config as { resolution?: string; fps?: number; requiredMode?: string; preferredModel?: string };
+  const config = project.config as {
+    resolution?: string; fps?: number; requiredMode?: string; preferredModel?: string; aspectRatio?: string;
+  };
   const resolution = Number((config.resolution ?? '1080p').replace('p', ''));
   const requiredMode = config.requiredMode ?? 'pose-guided';
 
@@ -175,6 +180,20 @@ async function submit(data: GenerationJobPayload) {
   const generationJobId = randomUUID();
   const outputKey = storageKey.segmentOutput(project.id, segment.id, data.attempt);
 
+  // 운영자 프롬프트를 먼저 점검한다. 시작 이미지와 충돌하는 요구(다른 장소·다른 인물·외모 변경)는
+  // 모델이 장면 전환으로 풀어버려 인물이 교체된다 — 막지는 않고 이력에 남겨 원인을 설명 가능하게 한다.
+  const operatorPrompt = segment.prompt ?? segment.scene?.prompt ?? null;
+  const promptRisks = inspectPrompt(operatorPrompt, {
+    mode: requiredMode as string,
+    castCount: project.cast.length,
+  });
+  if (promptRisks.length > 0) {
+    log.warn(
+      { segmentId: segment.id, risks: promptRisks.map((r) => ({ kind: r.kind, term: r.term })) },
+      `프롬프트가 신원 유지와 충돌한다 — ${summarizeRisks(promptRisks)}`,
+    );
+  }
+
   const request: GenerationRequest = {
     traceId: data.traceId,
     segmentId: segment.id,
@@ -182,9 +201,13 @@ async function submit(data: GenerationJobPayload) {
     durationMs: segment.endMs - segment.startMs,
     fps: config.fps ?? 30,
     resolution,
+    // 프로젝트 설정이 없으면 16:9 (§6.3). 비율을 받지 않는 제공자는 어댑터가 경고를 남긴다.
+    aspectRatio: config.aspectRatio === '9:16' ? '9:16' : '16:9',
     mode: requiredMode as never,
-    // 세그먼트에 직접 입력한 프롬프트가 우선이고, 비어 있으면 씬 프롬프트를 쓴다
-    prompt: segment.prompt ?? segment.scene?.prompt ?? null,
+    // 세그먼트 프롬프트가 우선이고 비어 있으면 씬 프롬프트를 쓴다.
+    // 제공자에는 신원 고정 문구를 붙여서 보낸다 — 붙이지 않으면 시작 이미지의 인물이
+    // 중간에 다른 사람으로 교체된다(prompt-identity.ts에 실측 근거).
+    prompt: withIdentityAnchor(operatorPrompt),
     seed,
     conditioningStrength,
     cast: castWithRefs,
@@ -198,6 +221,19 @@ async function submit(data: GenerationJobPayload) {
   // 제공자마다 받을 수 있는 이미지 수가 다르다. 실제로 넘긴 이미지와 빠진 첨부를 기록한다(URL은 만료되므로 제외).
   const imagePlan = provider.planImages(request);
 
+  // 외부 제공자는 공개 URL로만 이미지를 받아간다(§12.1). 로컬 주소를 그대로 보내면 제공자 쪽에서
+  // "Generation failed"로 끝나면서 시도 횟수와 크레딧만 사라진다 — 보내기 전에 막는다.
+  const localImage = imagePlan.images.find((i) => isLocalUrl(i.url));
+  if (localImage && !decision.model.code.startsWith('mock')) {
+    await failRouting(segment.id, project.id, data, new CrezError(
+      ErrorCode.GEN_PROVIDER_ERROR,
+      '레퍼런스 이미지 주소가 외부에서 열리지 않습니다 — S3_PUBLIC_ENDPOINT를 공개 주소로 설정한 뒤 다시 실행하세요',
+      { host: hostOf(localImage.url), model: decision.model.code },
+      422,
+    ));
+    return { failed: true, code: ErrorCode.GEN_PROVIDER_ERROR };
+  }
+
   const created = await prisma.generationJob.create({
     data: {
       id: generationJobId,
@@ -207,7 +243,10 @@ async function submit(data: GenerationJobPayload) {
       routingTrace: decision.trace as never,
       params: {
         mode: request.mode, durationMs: request.durationMs, fps: request.fps,
-        resolution: request.resolution, prompt: request.prompt,
+        resolution: request.resolution, aspectRatio: request.aspectRatio,
+        // 제공자에 실제로 보낸 프롬프트와 운영자가 쓴 원문을 함께 남긴다 — 결과를 나중에 설명하려면 둘 다 필요하다
+        prompt: request.prompt, operatorPrompt,
+        promptRisks: promptRisks.map((r) => ({ kind: r.kind, term: r.term, message: r.message })),
         conditioningStrength,
         strategy: data.strategy ?? null,
         references: castWithRefs.map((c) => ({
@@ -326,23 +365,40 @@ async function poll(data: GenerationPollJob & { projectId: string; segmentId: st
   }
 
   // ── SUCCEEDED ──────────────────────────────────────
-  const request = await rebuildRequest(genJob.id);
-  const fetched = await provider.fetchResult(data.providerJobId, request, descriptor);
-  // 어댑터가 알려준 위치의 결과물을 §15 스토리지 레이아웃의 키로 실체화한다.
-  const result = await materializeOutput(fetched, request.outputKey, {
-    isMock: provider.code === 'mock',
-    traceId: data.traceId,
+  // 폴링 체인이 재시도 등으로 둘 이상 살아 있으면 여기 동시에 도착한다. 306행의 상태 검사만으로는
+  // 같은 밀리초에 들어온 것들을 막지 못해 결과물과 QC가 중복 생성된다(실측: output 3~4건, QC 3건 = ML 비용 3배).
+  // 완료 표시를 먼저 선점(CAS)해서 한 번만 마무리한다.
+  const claimed = await prisma.generationJob.updateMany({
+    where: { id: genJob.id, status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] } },
+    data: { status: 'SUCCEEDED', finishedAt: new Date() },
   });
+  if (claimed.count === 0) return { skipped: 'already finalized' };
 
-  const output = await prisma.generationOutput.create({
-    data: {
-      jobId: genJob.id, storageKey: result.storageKey,
-      durationMs: result.durationMs, fps: result.fps, width: result.width, height: result.height,
-    },
-  });
+  let result;
+  let output;
+  try {
+    const request = await rebuildRequest(genJob.id);
+    const fetched = await provider.fetchResult(data.providerJobId, request, descriptor);
+    // 어댑터가 알려준 위치의 결과물을 §15 스토리지 레이아웃의 키로 실체화한다.
+    result = await materializeOutput(fetched, request.outputKey, {
+      isMock: provider.code === 'mock',
+      traceId: data.traceId,
+    });
+
+    output = await prisma.generationOutput.create({
+      data: {
+        jobId: genJob.id, storageKey: result.storageKey,
+        durationMs: result.durationMs, fps: result.fps, width: result.width, height: result.height,
+      },
+    });
+  } catch (e) {
+    // 선점해 놓고 내려받기·저장에서 깨지면 SUCCEEDED인데 결과물이 없는 상태로 남는다 — 실패로 확정한다
+    await failJob(genJob.id, data.segmentId, data.projectId, data, ErrorCode.GEN_PROVIDER_ERROR, e);
+    throw e;
+  }
+  // 상태·완료시각은 위에서 선점할 때 이미 기록했다. 여기서는 비용만 채운다.
   await prisma.generationJob.update({
-    where: { id: genJob.id },
-    data: { status: 'SUCCEEDED', finishedAt: new Date(), costAmount: result.costAmount },
+    where: { id: genJob.id }, data: { costAmount: result.costAmount },
   });
   await prisma.segment.update({ where: { id: data.segmentId }, data: { status: 'QC' } });
 
@@ -406,6 +462,7 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
     fps: Number(params.fps ?? 30),
     resolution: Number(params.resolution ?? 1080),
     mode: (params.mode as never) ?? 'pose-guided',
+    aspectRatio: params.aspectRatio === '9:16' ? '9:16' : '16:9',
     prompt: (params.prompt as string) ?? null,
     seed: j.seed ? Number(j.seed) : null,
     conditioningStrength: Number(params.conditioningStrength ?? 0.6),
@@ -426,9 +483,11 @@ async function failRouting(
   segmentId: string, projectId: string,
   data: { traceId: string; orgId: string; attempt: number }, err: CrezError,
 ) {
+  // 제출 전에 실패했으므로 한도 카운터를 되돌린다. job 시도 번호(data.attempt)와 한도 카운터는 다른 값이다.
+  const current = await prisma.segment.findUnique({ where: { id: segmentId }, select: { attemptCount: true } });
   await prisma.segment.update({
     where: { id: segmentId },
-    data: { status: 'FAILED', attemptCount: Math.max(0, data.attempt - 1) },
+    data: { status: 'FAILED', attemptCount: Math.max(0, (current?.attemptCount ?? 1) - 1) },
   });
   // 아무것도 만들지 못한 프로젝트가 RUNNING에 남으면 설정을 고칠 수 없다 — 생성 전(READY)으로 되돌린다
   const [inFlight, produced] = await Promise.all([
@@ -452,6 +511,71 @@ async function failRouting(
   childLogger({ traceId: data.traceId, segmentId }).warn({ code: err.code, ...detail }, 'generation routing failed');
 }
 
+/** 제공자가 받아갈 수 없는 주소인지 — 로컬 개발 주소로 제출하면 생성이 실패한다 (§12.1) */
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'minio', 'host.docker.internal']);
+function hostOf(url: string): string {
+  try { return new URL(url).hostname; } catch { return url.slice(0, 40); }
+}
+function isLocalUrl(url: string): boolean {
+  const host = hostOf(url);
+  return LOCAL_HOSTS.has(host) || host.endsWith('.local') || host.endsWith('.internal');
+}
+
+interface CancelJob {
+  traceId: string; orgId: string; projectId: string; segmentId: string;
+  generationJobId: string; providerJobId: string;
+}
+
+/**
+ * 제출한 생성을 제공자에서 취소한다 (§12.1).
+ *
+ * 로컬 job을 CANCELLED로 바꾸는 것만으로는 외부 생성이 멈추지 않는다 — 계속 만들어지고 과금된다.
+ * 제공자가 거부할 수도 있다(Higgsfield는 이미 진행 중인 요청의 취소를 400으로 거절한다).
+ * 그 경우 작업을 실패로 만들지 않고, 과금이 계속될 수 있다는 사실을 기록에 남긴다.
+ */
+async function cancelSubmission(data: CancelJob) {
+  const log = childLogger({ traceId: data.traceId, segmentId: data.segmentId });
+  const job = await prisma.generationJob.findUnique({
+    where: { id: data.generationJobId }, include: { model: true },
+  });
+  if (!job) return { skipped: 'job not found' };
+
+  const m = job.model;
+  const descriptor: ModelDescriptor = {
+    id: m.id, code: m.code, provider: m.provider as ModelDescriptor['provider'],
+    endpoint: m.endpoint, capabilities: m.capabilities as never,
+    costPerSecond: Number(m.costPerSecond ?? 0), status: m.status, metrics: m.metrics as never,
+  };
+
+  try {
+    await providerRegistry.resolve(descriptor).cancel(data.providerJobId, descriptor);
+    await prisma.generationJob.update({
+      where: { id: job.id },
+      data: { errorDetail: { providerCancel: 'REQUESTED', providerJobId: data.providerJobId } as never },
+    });
+    log.info({ providerJobId: data.providerJobId, model: m.code }, '제공자 취소 요청 완료');
+    return { cancelled: true };
+  } catch (e) {
+    const detail = e instanceof CrezError
+      ? { code: e.code, message: e.message }
+      : { code: null, message: String(e) };
+    await prisma.generationJob.update({
+      where: { id: job.id },
+      data: { errorDetail: { providerCancel: 'REFUSED', providerJobId: data.providerJobId, ...detail } as never },
+    });
+    await audit({
+      orgId: data.orgId, action: 'PROJECT_GENERATED', projectId: data.projectId,
+      payload: {
+        event: 'PROVIDER_CANCEL_REFUSED', segmentId: data.segmentId,
+        providerJobId: data.providerJobId, model: m.code, ...detail,
+      },
+      traceId: data.traceId,
+    });
+    log.warn({ providerJobId: data.providerJobId, ...detail }, '제공자 취소 거부 — 과금이 계속될 수 있다');
+    return { cancelled: false, ...detail };
+  }
+}
+
 async function failJob(
   generationJobId: string, segmentId: string, projectId: string,
   data: { traceId: string; orgId: string }, code: string, detail: unknown,
@@ -465,8 +589,11 @@ async function failJob(
   });
 
   const segment = await prisma.segment.findUnique({ where: { id: segmentId } });
+  // 다시 보내도 결과가 같은 코드 — 콘텐츠 정책 거부, 모델 접근 불가, 크레딧 부족.
+  // 원인을 고치기 전에는 재시도가 의미 없고, 유료 제공자에서는 헛돈만 나간다.
+  const terminal: string[] = [ErrorCode.GEN_CONTENT_POLICY, ErrorCode.GEN_NO_CAPABLE_MODEL, ErrorCode.GEN_QUOTA_EXCEEDED];
   // 재시도 여지가 남았으면 PENDING으로 되돌려 다음 생성 요청을 받을 수 있게 한다 (§5.1)
-  const exhausted = (segment?.attemptCount ?? 0) >= MAX_GENERATION_ATTEMPT || code === ErrorCode.GEN_CONTENT_POLICY;
+  const exhausted = (segment?.attemptCount ?? 0) >= MAX_GENERATION_ATTEMPT || terminal.includes(code);
   await prisma.segment.update({
     where: { id: segmentId }, data: { status: exhausted ? 'FAILED' : 'PENDING' },
   });

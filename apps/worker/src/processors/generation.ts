@@ -34,10 +34,27 @@ export async function generationProcessor(job: Job): Promise<unknown> {
   }
 }
 
-/** 재생성 2단계(REFERENCE_SWAP)를 위해 레퍼런스 자산을 선택한다 (§11) */
+/**
+ * 구간 번호를 대표 사진 자리로 돌린다.
+ * 사진이 1장뿐이면 돌릴 것이 없고, 사진이 없으면 -1(대표 없음)이다.
+ * 같은 구간은 항상 같은 사진을 쓴다 — 재실행할 때마다 시작 프레임이 바뀌면 결과를 비교할 수 없다.
+ */
+export function leadIndexFor(count: number, variantIndex: number): number {
+  if (count <= 0) return -1;
+  return ((variantIndex % count) + count) % count;
+}
+
+/**
+ * 재생성 2단계(REFERENCE_SWAP)를 위해 레퍼런스 자산을 선택한다 (§11).
+ *
+ * variantIndex는 "이 인물의 몇 번째 변주인가"다. image-to-video 제공자는 대표 이미지 1장을
+ * 시작 프레임으로 쓰므로, 모든 구간이 같은 사진을 쓰면 1분 영상의 컷 12개가 전부 같은 장소·같은
+ * 포즈에서 시작한다. 구간 번호로 대표를 돌려 그것을 막는다(§5.1).
+ */
 async function pickReferences(
   identityId: string,
   strategy: GenerationJobPayload['strategy'],
+  variantIndex = 0,
 ): Promise<ReferenceAsset[]> {
   const assets = await prisma.identityAsset.findMany({
     where: { identityId, isUsable: true, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE'] } },
@@ -60,10 +77,13 @@ async function pickReferences(
       return Number(b.qualityScore ?? 0) - Number(a.qualityScore ?? 0);
     });
 
+  const picked = ranked.slice(0, 8);
+  const leadIndex = leadIndexFor(picked.length, variantIndex);
+
   // 외부 제공자는 공개 URL만 받으므로 제출 직전에 presigned GET URL을 만든다.
   // 버킷은 비공개를 유지하고, 만료 시간이 붙은 URL만 밖으로 나간다(§15).
   return Promise.all(
-    ranked.slice(0, 8).map(async (a) => ({
+    picked.map(async (a, i) => ({
       identityId,
       assetId: a.id,
       storageKey: a.storageKey,
@@ -71,6 +91,7 @@ async function pickReferences(
       captureSlot: a.captureSlot,
       expression: a.expression,
       quality: a.qualityScore ? Number(a.qualityScore) : null,
+      lead: i === leadIndex,
     })),
   );
 }
@@ -158,7 +179,8 @@ async function submit(data: GenerationJobPayload) {
       profileId: c.profileId,
       slotIndex: c.slotIndex,
       appearance: c.appearance as Record<string, unknown>,
-      references: await pickReferences(c.identityId, data.strategy),
+      // 구간 번호로 대표 사진을 돌린다 — 컷마다 다른 장면에서 출발하도록
+      references: await pickReferences(c.identityId, data.strategy, segment.segmentIndex),
     });
   }
 

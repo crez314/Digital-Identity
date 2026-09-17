@@ -18,7 +18,9 @@ export function planImages(req: GenerationRequest, max: number): ImagePlan {
   const faces = cast.map((c) =>
     c.references
       .filter((r) => r.signedUrl)
-      .sort((a, b) => (b.quality ?? 0) - (a.quality ?? 0))
+      // 워커가 대표로 지정한 사진이 먼저다 — 품질 순으로만 세우면 모든 구간이
+      // 같은 사진(= image-to-video에서는 같은 시작 프레임)으로 수렴한다(§5.1)
+      .sort((a, b) => Number(b.lead ?? false) - Number(a.lead ?? false) || (b.quality ?? 0) - (a.quality ?? 0))
       .map<PlannedImage>((r) => ({
         role: 'IDENTITY', url: r.signedUrl as string, slotIndex: c.slotIndex, identityId: r.identityId, assetId: r.assetId,
       })),

@@ -53,6 +53,11 @@ export const QcThresholds = z.object({
    * 기존 ruleset 행에는 없는 값이라 기본값을 둔다.
    */
   assignMinSimilarity: z.number().default(0.35),
+  /**
+   * 구간(컷) 사이 인물 점수 편차 허용치. maxSpread가 "한 컷 안 캐스트 인물 간" 편차인 것과 달리,
+   * 이 값은 "같은 인물의 컷 간" 편차다 — 컷마다 합격해도 이어 붙이면 사람이 바뀐 것처럼 보이는 경우를 막는다.
+   */
+  sequenceMaxSpread: z.number().default(0.15),
 });
 
 export const RulesetDto = z.object({
@@ -129,6 +134,11 @@ export const AcceptSegmentRequest = z.object({
 export const CreateMasterRequest = z.object({
   normalizeColor: z.boolean().default(true),
   normalizeTiming: z.boolean().default(true),
+  /**
+   * 구간 간 인물 편차 검사를 건너뛴다. 운영자가 결과를 눈으로 확인하고 그래도 묶겠다고
+   * 판단한 경우에만 쓴다 — 감사 기록에 남는다(§14.2).
+   */
+  ignoreSequenceCheck: z.boolean().default(false),
 });
 
 export const CreateDerivativesRequest = z.object({

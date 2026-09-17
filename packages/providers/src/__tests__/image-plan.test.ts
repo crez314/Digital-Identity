@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { planImages } from '../image-plan';
 import type { GenerationRequest, PromptAttachment } from '../types';
 
-const person = (id: string, slotIndex: number, faces: number) => ({
+const person = (id: string, slotIndex: number, faces: number, leadIndex = -1) => ({
   identityId: id, profileId: `p-${id}`, slotIndex, appearance: {},
   references: Array.from({ length: faces }, (_, i) => ({
     identityId: id, assetId: `${id}${i + 1}`, storageKey: 'k', signedUrl: `https://s3/${id}${i + 1}.jpg`,
-    captureSlot: null, expression: null, quality: 1 - i * 0.1,
+    captureSlot: null, expression: null, quality: 1 - i * 0.1, lead: i === leadIndex,
   })),
 });
 const ref = (referenceId: string, kind: PromptAttachment['kind'], slotIndex: number | null, signed = true): PromptAttachment => ({
@@ -52,5 +52,24 @@ describe('제공자 이미지 배분', () => {
     const plan = planImages(request([person('A', 0, 1)], [ref('broken', 'HAIR', 0, false)]), 3);
     expect(urls(plan)).toEqual(['A1']);
     expect(plan.droppedReferenceIds).toEqual(['broken']);
+  });
+});
+
+describe('구간별 대표 이미지', () => {
+  it('워커가 지정한 대표가 품질 1위를 제치고 시작 프레임이 된다', () => {
+    // image-to-video는 첫 이미지가 곧 시작 프레임이다. 대표를 돌리지 못하면
+    // 1분 영상의 컷 12개가 전부 같은 사진에서 출발한다.
+    const r = planImages(request([person('a', 0, 4, 2)]), 1);
+    expect(urls(r)).toEqual(['a3']);
+  });
+
+  it('대표 지정이 없으면 기존대로 품질 순이다', () => {
+    const r = planImages(request([person('a', 0, 4)]), 1);
+    expect(urls(r)).toEqual(['a1']);
+  });
+
+  it('대표를 세워도 나머지 사진은 품질 순으로 뒤를 채운다', () => {
+    const r = planImages(request([person('a', 0, 4, 3)]), 3);
+    expect(urls(r)).toEqual(['a4', 'a1', 'a2']);
   });
 });

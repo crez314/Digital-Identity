@@ -47,6 +47,12 @@ export interface ReferenceAsset {
   captureSlot: string | null;
   expression: string | null;
   quality: number | null;
+  /**
+   * 이 인물의 대표 이미지로 먼저 쓴다. image-to-video에서는 이것이 곧 시작 프레임이다.
+   * 워커가 구간마다 다른 사진을 대표로 세워 컷이 전부 같은 장면에서 시작하는 것을 막는다(§5.1).
+   * 지정이 없으면 기존대로 품질 순으로 고른다.
+   */
+  lead?: boolean;
 }
 
 /** 세그먼트 프롬프트에 붙인 참고 이미지 — 배경·의상·헤어 */

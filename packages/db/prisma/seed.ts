@@ -308,6 +308,9 @@ async function main() {
         // §9.1 τ_assign — 이 값을 넘지 못한 track은 캐스트 인물이 아니다.
         // 넘기지 않으면 화면의 다른 사람 track까지 캐스트에 묶여 지표가 망가진다.
         assignMinSimilarity: 0.35,
+        // 컷 사이 같은 인물의 점수 편차 허용치. 컷마다 합격해도 이어 붙이면
+        // 사람이 바뀐 것처럼 보이는 경우를 마스터 결합 직전에 막는다.
+        sequenceMaxSpread: 0.15,
       },
     },
   });

@@ -14,6 +14,7 @@ export const TH: QcThresholds = {
   trackLostMinDurationSec: 0.5,
   minFrameQuality: 0.35,
   assignMinSimilarity: 0.35,
+  sequenceMaxSpread: 0.15,
 };
 
 /** 200ms 간격 시계열 생성기 */

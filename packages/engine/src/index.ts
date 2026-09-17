@@ -8,3 +8,4 @@ export * from './severity';
 export * from './fusion';
 export * from './distance';
 export * from './prompt-guard';
+export * from './sequence';

@@ -2,13 +2,17 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@crez/db';
 import { CrezError, ErrorCode, QUEUE, storageKey } from '@crez/shared';
-import { JOB_NAME } from '@crez/contracts';
+import { JOB_NAME, QcThresholds } from '@crez/contracts';
+import { checkSequenceConsistency, type SequenceSegmentScore } from '@crez/engine';
 import { PRISMA } from '../../common/prisma.module';
 import { QueueService } from '../../common/queue/queue.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { S3Service } from '../../common/storage/s3.service';
 import { RightsService } from '../rights/rights.service';
 import type { AuthUser } from '../../common/auth/auth.types';
+
+/** ruleset을 읽지 못했을 때만 쓰는 값 — 정상 경로에서는 qc_ruleset.thresholds가 기준이다 */
+const DEFAULT_SEQUENCE_MAX_SPREAD = 0.15;
 
 const ASPECT_BY_KIND: Record<string, string> = {
   SHORTS: '9:16', REELS: '9:16', TIKTOK: '9:16',
@@ -31,7 +35,8 @@ export class MasterService {
    */
   async createMaster(
     user: AuthUser, projectId: string,
-    input: { normalizeColor: boolean; normalizeTiming: boolean }, traceId: string,
+    input: { normalizeColor: boolean; normalizeTiming: boolean; ignoreSequenceCheck?: boolean },
+    traceId: string,
   ) {
     const project = await this.prisma.project.findFirst({
       where: { id: projectId, orgId: user.orgId },
@@ -77,6 +82,19 @@ export class MasterService {
       );
     }
 
+    // 구간별 QC는 "이 컷 안에서 인물이 유지되는가"만 본다. 컷을 수십 개 이어 붙이는 긴 영상에서는
+    // 컷마다 합격해도 1번 컷과 12번 컷의 인물이 달라 보일 수 있어, 묶기 전에 컷 사이 편차를 한 번 더 본다.
+    const sequence = await this.checkSequence(segments);
+    if (!sequence.ok && !input.ignoreSequenceCheck) {
+      throw new CrezError(
+        ErrorCode.QC_BELOW_THRESHOLD,
+        `구간 사이 인물 편차가 큽니다 — ${sequence.verdict.reasons.join(' / ')}. `
+        + '해당 구간을 재생성하거나, 결과를 확인했다면 ignoreSequenceCheck로 진행하세요.',
+        { sequence: sequence.verdict },
+        409,
+      );
+    }
+
     const last = await this.prisma.masterVideo.findFirst({ where: { projectId }, orderBy: { version: 'desc' } });
     const version = (last?.version ?? 0) + 1;
     const masterId = randomUUID();
@@ -85,6 +103,8 @@ export class MasterService {
     const provenance = {
       spec: 'CREZ DICE v1.1',
       generatedAt: new Date().toISOString(),
+      // 어떤 기준으로 통과시켰는지도 이력이다 — 건너뛰고 묶었다면 그 사실까지 남는다
+      sequenceCheck: { ...sequence.verdict, ignored: Boolean(input.ignoreSequenceCheck) },
       project: { id: project.id, title: project.title, type: project.projectType, config: project.config },
       cast: project.cast.map((c) => ({
         identityId: c.identityId, identityCode: c.identity.code,
@@ -127,10 +147,48 @@ export class MasterService {
 
     await this.audit.record({
       orgId: user.orgId, actorId: user.id, action: 'MASTER_FINALIZED', projectId,
-      payload: { masterId, version, segmentCount: segments.length }, traceId,
+      payload: {
+        masterId, version, segmentCount: segments.length,
+        sequenceOk: sequence.ok,
+        sequenceIgnored: Boolean(input.ignoreSequenceCheck) && !sequence.ok,
+        sequenceSpread: sequence.verdict.perIdentity.map((p) => ({ identityId: p.identityId, spread: p.spread })),
+      },
+      traceId,
     });
 
     return { masterId: master.id, version, jobId, queue: QUEUE.MEDIA, traceId };
+  }
+
+  /**
+   * 채택된 결과물의 QC 점수를 구간 순서대로 모아 컷 사이 인물 편차를 본다.
+   * 허용치는 ruleset에서 온다 — 코드에 박으면 프로젝트마다 다른 기준을 쓸 수 없다(§10).
+   */
+  private async checkSequence(
+    segments: Array<{
+      segmentIndex: number;
+      acceptedOutputId: string | null;
+      jobs: Array<{ outputs: Array<{ id: string; qcRuns: Array<{ perIdentity: unknown }> }> }>;
+    }>,
+  ) {
+    // ruleset이 없거나 형식이 달라도 결합 자체를 막지는 않는다 — 그때는 기본 허용치로 검사한다
+    const ruleset = await this.prisma.qcRuleset.findFirst({ where: { isActive: true } });
+    const parsed = QcThresholds.safeParse(ruleset?.thresholds ?? {});
+    const maxSpread = parsed.success ? parsed.data.sequenceMaxSpread : DEFAULT_SEQUENCE_MAX_SPREAD;
+
+    const scores: SequenceSegmentScore[] = [];
+    for (const s of segments) {
+      const output = s.jobs.flatMap((j) => j.outputs).find((o) => o.id === s.acceptedOutputId);
+      const perIdentityRaw = output?.qcRuns[0]?.perIdentity as Record<string, { score?: number }> | undefined;
+      if (!perIdentityRaw) continue;   // 수동 승인 등으로 QC 기록이 없으면 비교에서 뺀다
+      const perIdentity: Record<string, number> = {};
+      for (const [identityId, m] of Object.entries(perIdentityRaw)) {
+        if (typeof m?.score === 'number') perIdentity[identityId] = m.score;
+      }
+      if (Object.keys(perIdentity).length > 0) scores.push({ segmentIndex: s.segmentIndex, perIdentity });
+    }
+
+    const verdict = checkSequenceConsistency(scores, maxSpread);
+    return { ok: verdict.ok, verdict };
   }
 
   async listMasters(user: AuthUser, projectId: string) {

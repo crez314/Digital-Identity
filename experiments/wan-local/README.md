@@ -110,6 +110,34 @@ pnpm --filter @crez/worker exec tsx ../../experiments/wan-local/score-local.ts \
 
 crez-ml의 영상 디코딩은 h264를 전제로 하므로, webm은 먼저 mp4로 변환하는 편이 안전하다.
 
+## GPU 대여로 옮기기
+
+이 맥의 한계(속도·메모리·480p 얼굴 크기)는 GPU를 빌리면 전부 풀린다. 초 단위 과금이라
+쓴 만큼만 낸다. `runpod-setup.sh`가 같은 워크플로를 대여 인스턴스에 그대로 올린다.
+
+```bash
+# 인스턴스에서 (네트워크 볼륨이 /workspace에 붙어 있어야 가중치가 보존된다)
+bash runpod-setup.sh 14b
+
+# 맥에서 쏜다
+python run.py --server http://<pod주소>:8188 \
+  --weights wan2.1_vace_14B_fp16.safetensors \
+  --width 720 --height 960 --length 81 --steps 20
+```
+
+GPU별 적정 모델 (2026-09-17 RunPod 공시가)
+
+| GPU | 시간당 (커뮤니티~시큐어) | 올릴 수 있는 모델 |
+|---|---|---|
+| RTX 4090 24GB | $0.34 ~ $0.74 | 1.3B 여유, 14B는 양자화 필요 |
+| RTX 5090 32GB | $0.69 ~ $0.99 | 14B 양자화 |
+| L40S 48GB | $0.79 ~ $1.09 | **14B fp16** |
+| A100 80GB | $1.19 ~ $1.59 | 14B fp16 + 긴 클립 |
+
+스토리지는 별도다 — 네트워크 볼륨 GB당 월 $0.07(1TB 미만). 14B fp16 34.7GB + 텍스트 인코더 +
+VAE면 50GB 남짓이라 **월 $3.5 수준**이고, Pod을 꺼도 계속 나간다. Pod 볼륨(디스크)은
+유휴 시 GB당 월 $0.20로 더 비싸니 가중치는 반드시 네트워크 볼륨에 둔다.
+
 ## 남은 질문
 
 - **진짜 "생성 중 개입"**(디노이징 스텝마다 얼굴 유사도를 재서 가이던스 조절)은 ComfyUI 기성

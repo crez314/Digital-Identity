@@ -210,6 +210,8 @@ describe('Higgsfield 어댑터 — 오류 분류 (§17)', () => {
     // 2026-09-16 veo3.1 reference-to-video 실패가 CREZ-GEN-003(콘텐츠 정책)으로 남아 원인을 잘못 짚게 했다
     expect(classifyHiggsfieldError('model_not_found')).toBe('CREZ-GEN-001');
     expect(classifyHiggsfieldError('model_disabled')).toBe('CREZ-GEN-001');
+    // 423 model_blocked — 계정에서 막힌 모델. 재시도해도 소용없다(2026-09-18 kling 2.1 계열)
+    expect(classifyHiggsfieldError('model_blocked')).toBe('CREZ-GEN-001');
   });
 
   it('크레딧 부족은 quota 코드로 분류한다', () => {

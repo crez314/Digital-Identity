@@ -61,7 +61,11 @@ export interface HiggsfieldConfig {
  */
 export function classifyHiggsfieldError(detail: string): ErrorCodeValue {
   const d = detail.toLowerCase();
-  if (d.includes('model_not_found') || d.includes('model_disabled')) return ErrorCode.GEN_NO_CAPABLE_MODEL;
+  // model_blocked(423)은 계정에서 그 모델이 막힌 상태다 — 2026-09-18 kling 2.1 계열 3종이 이렇게 돌아왔다.
+  // 제공자 장애가 아니라 쓸 수 없는 모델이므로 재시도 대상이 아니다.
+  if (d.includes('model_not_found') || d.includes('model_disabled') || d.includes('model_blocked')) {
+    return ErrorCode.GEN_NO_CAPABLE_MODEL;
+  }
   if (d.includes('credit') || d.includes('quota') || d.includes('balance')) return ErrorCode.GEN_QUOTA_EXCEEDED;
   if (d.includes('nsfw') || d.includes('content_policy') || d.includes('moderation') || d.includes('safety')) {
     return ErrorCode.GEN_CONTENT_POLICY;

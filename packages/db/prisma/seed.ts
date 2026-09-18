@@ -315,6 +315,15 @@ async function main() {
     },
   });
 
+  // ── §12.1 지출 한도 ────────────────────────────────────
+  // 생성 한 번이 수십 건의 유료 요청이고 제출한 요청은 되돌릴 수 없다. 한도는 제출 전에 건다.
+  // 크레딧 단가는 계약 정보라 시드가 알 수 없다 — 비워 두고, 채우기 전까지 유료 생성을 막는다.
+  await prisma.spendPolicy.upsert({
+    where: { orgId: org.id },
+    update: {},
+    create: { orgId: org.id, monthlyBudgetKrw: 100000 },
+  });
+
   // ── §12 Model Router 가중치 ────────────────────────────
   await prisma.routingRuleset.upsert({
     where: { version: 'routing-v1' },

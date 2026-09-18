@@ -8,6 +8,7 @@ import { QueueService } from '../../common/queue/queue.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { EventsService } from '../../common/events/events.service';
 import { RightsService } from '../rights/rights.service';
+import { SpendService } from '../spend/spend.service';
 import type { AuthUser } from '../../common/auth/auth.types';
 
 /**
@@ -28,6 +29,7 @@ export class GenerationService {
     private readonly audit: AuditService,
     private readonly events: EventsService,
     private readonly rights: RightsService,
+    private readonly spend: SpendService,
   ) {}
 
   /**
@@ -38,7 +40,10 @@ export class GenerationService {
     const project = await this.prisma.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
     if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
     const segments = await this.selectSegments(projectId, input.segmentIds);
-    return this.estimateCost(project, segments, input.modelHint);
+    const cost = await this.estimateCost(project, segments, input.modelHint);
+    // 화면이 "이번 실행 얼마 / 이번 달 남은 한도 얼마"를 함께 보여줄 수 있어야 한다
+    const spend = await this.spend.status(user);
+    return { ...cost, spend };
   }
 
   async generate(
@@ -90,6 +95,10 @@ export class GenerationService {
       (s) => s.status !== 'GENERATING' && s.status !== 'QC' && s.attemptCount < MAX_GENERATION_ATTEMPT,
     );
     const cost = await this.estimateCost(project, willSubmit, input.modelHint);
+
+    // 조직 월 한도 — 돈이 나가는 실행에만 건다. 무료 모델까지 막으면 파이프라인 검증이 멈춘다(§12.1).
+    const budget = cost.free ? null : await this.spend.assertWithinBudget(user.orgId, cost.max);
+
     const cap = input.maxCost ?? costConfirmThreshold();
     if (cost.max > cap) {
       throw new CrezError(
@@ -149,6 +158,10 @@ export class GenerationService {
         segmentCount: submitted.length,
         estimatedCost: { min: cost.min, max: cost.max, worstCase: cost.worstCase, models: cost.models },
         costCap: cap,
+        budget: budget && {
+          monthToDateKrw: budget.monthToDateKrw, estimateKrw: budget.estimateKrw,
+          remainingKrw: budget.remainingKrw,
+        },
         modelHint: input.modelHint ?? null,
         cast: project.cast.map((c) => ({ identityId: c.identityId, profileId: c.profileId, code: c.identity.code })),
       },
@@ -161,7 +174,7 @@ export class GenerationService {
       at: new Date().toISOString(), traceId,
     });
 
-    return { submitted, estimatedCost: cost, traceId };
+    return { submitted, estimatedCost: cost, budget, traceId };
   }
 
   /** 자동 선택(PENDING·FAILED)과 지정 선택을 한 곳에서 처리한다 — 견적과 실행이 같은 집합을 봐야 한다 */

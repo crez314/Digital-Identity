@@ -24,8 +24,28 @@ model Organization {
   users      AppUser[]
   identities Identity[]
   projects   Project[]
+  spendPolicy SpendPolicy?
 
   @@map("organization")
+}
+
+/// 조직 단위 지출 한도 (§12.1).
+/// 생성 한 번이 수십 건의 유료 요청이고 제출한 요청은 취소가 거부될 수 있어 되돌릴 수 없다.
+/// 그래서 한도는 사후 정산이 아니라 제출 전에 건다.
+model SpendPolicy {
+  orgId              String   @id @map("org_id") @db.Uuid
+  /// 월 상한(원). null이면 금액 상한 없음
+  monthlyBudgetKrw   Decimal? @map("monthly_budget_krw") @db.Decimal(14, 2)
+  /// 1 크레딧의 원화 단가. 견적은 크레딧으로 나오므로 이 값이 있어야 원화 상한을 적용할 수 있다
+  creditUnitPriceKrw Decimal? @map("credit_unit_price_krw") @db.Decimal(12, 4)
+  /// 단가를 모르는 동안 유료 생성을 막을지. 기본 true — 얼마가 나갈지 모르는 채로 돈을 쓰지 않는다
+  blockWhenUnpriced  Boolean  @default(true) @map("block_when_unpriced")
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedBy          String?  @map("updated_by") @db.Uuid
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("spend_policy")
 }
 
 model AppUser {

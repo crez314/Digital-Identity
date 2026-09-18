@@ -18,13 +18,15 @@ import { QcModule } from './modules/qc/qc.module';
 import { MasterModule } from './modules/master/master.module';
 import { AuditReadModule } from './modules/audit/audit-read.module';
 import { ModelsModule } from './modules/models/models.module';
+import { SpendModule } from './modules/spend/spend.module';
 import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env', '../../.env'] }),
     PrismaModule, StorageModule, MlModule, QueueModule, AuditModule, EventsModule, RulesetModule, AuthModule,
-    IdentityModule, RightsModule, ProjectModule, QcModule, MasterModule, AuditReadModule, ModelsModule, HealthModule,
+    IdentityModule, RightsModule, ProjectModule, QcModule, MasterModule, AuditReadModule, ModelsModule, SpendModule,
+    HealthModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: AuthGuard },

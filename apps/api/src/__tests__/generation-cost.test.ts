@@ -47,8 +47,13 @@ function setup(segments: ReturnType<typeof segment>[], opts: {
   const queue = { add: vi.fn().mockResolvedValue('job1') };
   const events = { publish: vi.fn() };
   const rights = { enforce: vi.fn().mockResolvedValue(undefined) };
+  // 지출 한도는 별도 테스트(generation-budget)에서 다룬다 — 여기서는 통과시킨다
+  const spend = {
+    assertWithinBudget: vi.fn().mockResolvedValue(null),
+    status: vi.fn().mockResolvedValue({ policy: {}, monthToDateCredits: 0 }),
+  };
   const svc = new GenerationService(
-    prisma as never, queue as never, audit as never, events as never, rights as never,
+    prisma as never, queue as never, audit as never, events as never, rights as never, spend as never,
   );
   return { svc, prisma, audit, queue };
 }

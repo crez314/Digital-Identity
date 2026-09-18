@@ -128,6 +128,21 @@ interface CostEstimate {
   worstCase: number;
   free: boolean;
   pinnedModel: string | null;
+  spend?: {
+    monthToDateKrw: number | null;
+    remainingKrw: number | null;
+    blocked: boolean;
+    policy: { monthlyBudgetKrw: number | null };
+  };
+}
+
+/** 이번 달 남은 한도. 단가가 없어 막혀 있으면 그 사실을 먼저 알린다 */
+function budgetText(e: CostEstimate): string | null {
+  const s = e.spend;
+  if (!s) return null;
+  if (s.blocked) return '크레딧 단가 미설정 — 유료 생성 차단됨';
+  if (s.remainingKrw === null) return null;
+  return `이번 달 ${(s.monthToDateKrw ?? 0).toLocaleString('ko-KR')}원 사용 · 남은 한도 ${s.remainingKrw.toLocaleString('ko-KR')}원`;
 }
 
 /** 모델이 고정돼 있으면 한 값, 아니면 구간으로 보여 준다 */
@@ -233,6 +248,7 @@ export default function ProjectDetail() {
           {estimate.data && !estimate.data.free && estimate.data.segmentCount > 0 ? (
             <span className="text-xs text-neutral-600">
               예상 비용 {costText(estimate.data)} · 구간 {estimate.data.segmentCount}개
+              {budgetText(estimate.data) ? <span className="ml-1 text-neutral-500">· {budgetText(estimate.data)}</span> : null}
             </span>
           ) : null}
           <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT' || generatable === 0}>생성 실행</Button>

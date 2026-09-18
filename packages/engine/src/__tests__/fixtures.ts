@@ -15,6 +15,7 @@ export const TH: QcThresholds = {
   minFrameQuality: 0.35,
   assignMinSimilarity: 0.35,
   sequenceMaxSpread: 0.15,
+  minFaceHeightPx: 110,
 };
 
 /** 200ms 간격 시계열 생성기 */

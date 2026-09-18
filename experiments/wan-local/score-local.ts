@@ -49,6 +49,7 @@ async function main() {
   console.log('신체 유사도 ', m.bodySimilarity);
   console.log('시간 일관성 ', m.temporalConsistency);
   console.log('binding    ', m.bindingStability);
+  console.log('얼굴 크기  ', m.medianFaceHeightPx, 'px (작으면 임베딩이 흐려져 유사도가 낮게 나온다)');
   console.log('프레임별   ', series.map((s) => Number(s.similarity).toFixed(2)).join(' '));
   await prisma.$disconnect();
 }

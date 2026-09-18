@@ -58,6 +58,14 @@ export const QcThresholds = z.object({
    * 이 값은 "같은 인물의 컷 간" 편차다 — 컷마다 합격해도 이어 붙이면 사람이 바뀐 것처럼 보이는 경우를 막는다.
    */
   sequenceMaxSpread: z.number().default(0.15),
+  /**
+   * 얼굴 유사도를 신뢰할 수 있는 최소 얼굴 픽셀 높이.
+   *
+   * 얼굴이 작으면 임베딩이 흐려져 같은 사람도 유사도가 낮게 나온다. 실측(2026-09-18, 동일 인물·동일 레퍼런스):
+   * 84px → 0.504, 87px → 0.443, 113px → 0.556, 140px → 0.711.
+   * 이 값 미만이면 점수를 "닮지 않았다"로 읽으면 안 된다 — 판정 근거가 얇다는 뜻이다.
+   */
+  minFaceHeightPx: z.number().default(110),
 });
 
 export const RulesetDto = z.object({

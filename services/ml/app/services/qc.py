@@ -160,6 +160,7 @@ def score(
         body_sims: list[float] = []
         face_deltas: list[float] = []
         body_deltas: list[float] = []
+        face_heights: list[float] = []
         valid = 0
         total = 0
         prev_face: np.ndarray | None = None
@@ -182,6 +183,11 @@ def score(
                 ms = int(f["ms"])
                 adjacent = prev_ms is not None and (ms - prev_ms) <= max_adjacent_gap_ms
                 prev_ms = ms
+                # 얼굴이 화면에서 차지하는 픽셀 크기. 작을수록 임베딩이 흐려져 유사도가 낮게 나온다 —
+                # "다른 사람"과 "너무 작아 판정 못 함"을 구분하려면 이 값을 함께 봐야 한다(§10.1).
+                face_h = float((f.get("bbox") or {}).get("h") or 0.0)
+                if face_h > 0:
+                    face_heights.append(face_h)
                 quality = float(f.get("faceQuality") or 0.0)
                 occlusion = float(f.get("occlusion") or 0.0)
 
@@ -231,6 +237,7 @@ def score(
 
                 series.append({
                     "ms": int(f["ms"]),
+                    "faceHeightPx": face_h if face_h > 0 else None,
                     "similarity": face_sim,
                     "runnerUpSimilarity": runner_sim,
                     "runnerUpIdentityId": runner_id,
@@ -266,6 +273,8 @@ def score(
             "temporalBodyConsistency": _temporal_consistency(body_deltas) if body_deltas else None,
             "motionConsistency": _motion_consistency(tracks, source_tracks, track_index),
             "bindingStability": float(min(1.0, assigned_ms / total_span)),
+            # 판정 근거의 두께 — 얼굴이 몇 픽셀이었는지. 상위 계층이 "판정 곤란"을 구분하는 데 쓴다
+            "medianFaceHeightPx": float(np.median(face_heights)) if face_heights else None,
             "validFrameRatio": float(valid / total) if total else 0.0,
             "series": series,
             "trackSpans": [

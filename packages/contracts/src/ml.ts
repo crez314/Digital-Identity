@@ -206,6 +206,11 @@ export const QcScoreRequest = z.object({
 
 export const PerIdentityRawMetrics = z.object({
   identityId: z.string(),
+  /**
+   * 얼굴 픽셀 높이의 중앙값. 얼굴이 작으면 임베딩이 흐려져 유사도가 낮게 나오므로,
+   * "다른 사람"과 "너무 작아 판정할 수 없음"을 구분하려면 점수와 함께 봐야 한다(§10.1).
+   */
+  medianFaceHeightPx: z.number().nullable().optional(),
   faceSimilarity: z.number(),
   /** 신체 기준 벡터가 없으면 null — 상위 계층이 가중치를 재분배한다 */
   bodySimilarity: z.number().nullable(),

@@ -1,7 +1,7 @@
 import type { Job } from 'bullmq';
 import { getProfileCentroids, prisma } from '@crez/db';
 import {
-  classifyOutcome, compositeScore, detectAll, judgeMultiPerson,
+  classifyOutcome, compositeScore, detectAll, judgeEvidence, judgeMultiPerson,
   type DetectedFinding, type IdentitySeries,
 } from '@crez/engine';
 import {
@@ -100,7 +100,23 @@ export async function qcProcessor(job: Job): Promise<unknown> {
       };
       const score = compositeScore(metrics, weights);
       scoreByIdentity[m.identityId] = score;
-      perIdentity[m.identityId] = { ...metrics, score };
+
+      // 얼굴이 작으면 같은 사람도 유사도가 낮게 나온다. 점수와 함께 "그 점수를 믿어도 되는가"를 남긴다 —
+      // 구분하지 않으면 해상도가 낮아 생긴 낮은 점수를 인물 불일치로 오해하고,
+      // 재생성 사다리가 고칠 수 없는 것을 고치려고 돈을 쓴다(§10.1).
+      const evidence = judgeEvidence(m.medianFaceHeightPx, thresholds.minFaceHeightPx);
+      if (evidence.level !== 'OK') {
+        log.warn(
+          { identityId: m.identityId, medianFaceHeightPx: evidence.medianFaceHeightPx, score },
+          `신원 점수의 근거가 얇다 — ${evidence.note}`,
+        );
+      }
+      perIdentity[m.identityId] = {
+        ...metrics, score,
+        medianFaceHeightPx: evidence.medianFaceHeightPx,
+        evidenceLevel: evidence.level as never,
+        evidenceNote: evidence.note as never,
+      };
 
       const series: IdentitySeries = {
         identityId: m.identityId,

@@ -207,6 +207,8 @@ class QcScoreRequest(BaseModel):
 
 class QcSeriesPoint(BaseModel):
     ms: int
+    # 얼굴이 화면에서 차지한 픽셀 높이. 작으면 임베딩이 흐려진다
+    faceHeightPx: float | None = None
     similarity: float
     runnerUpSimilarity: float | None
     runnerUpIdentityId: str | None
@@ -233,6 +235,8 @@ class PerIdentityRawMetrics(BaseModel):
     faceSimilarity: float
     bodySimilarity: float | None
     temporalConsistency: float
+    # 판정 근거의 두께 — 얼굴 픽셀 높이의 중앙값
+    medianFaceHeightPx: float | None = None
     # 신체의 시간축 안정성 — 얼굴과 별도로 산출한다
     temporalBodyConsistency: float | None = None
     motionConsistency: float | None

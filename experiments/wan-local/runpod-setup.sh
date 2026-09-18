@@ -11,6 +11,11 @@
 #   python run.py --server http://<pod주소>:8188 --model fp16 --width 720 --height 960 --length 81 --steps 20
 set -euo pipefail
 
+# RunPod 이미지의 시스템 파이썬은 PEP 668로 보호돼 있어 pip이 거절한다.
+# 여기 컨테이너는 이 작업 전용이고 torch가 이미 깔려 있어 venv를 새로 만들 이유가 없다 —
+# 시스템 환경에 그대로 설치한다.
+export PIP_BREAK_SYSTEM_PACKAGES=1
+
 SIZE="${1:-1.3b}"
 ROOT="${WAN_ROOT:-/workspace}"
 COMFY="$ROOT/ComfyUI"

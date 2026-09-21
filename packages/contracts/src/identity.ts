@@ -34,8 +34,12 @@ export const IdentityDto = z.object({
     .optional(),
 });
 
+/**
+ * 슬롯을 고르지 않고 한꺼번에 올릴 수 있다. assetType/captureSlot을 비우면 UNSORTED로 저장되고
+ * 워커가 측정해 정면·측면·전신으로 분류한다(§8.1 확장) — 수십·수백 장을 사람이 고를 수는 없다.
+ */
 export const AssetUploadUrlRequest = z.object({
-  assetType: AssetType,
+  assetType: AssetType.default('UNSORTED'),
   captureSlot: CaptureSlot.optional(),
   expression: Expression.optional(),
   contentType: z.string(),

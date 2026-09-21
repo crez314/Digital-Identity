@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
 import { prisma, deleteEmbeddingsForAsset, insertEmbedding, listEmbeddings, setProfileCentroids } from '@crez/db';
 import {
-  BODY_EMBEDDING_DIM, CrezError, ErrorCode, FACE_EMBEDDING_DIM,
+  ASSET_QUALITY_POLICY, BODY_EMBEDDING_DIM, CrezError, ErrorCode, FACE_EMBEDDING_DIM,
   REQUIRED_BODY_SLOTS, REQUIRED_FACE_SLOTS, childLogger, storageKey,
 } from '@crez/shared';
 import { JOB_NAME, type AssetQualityJob, type ProfileBuildJob } from '@crez/contracts';
@@ -10,6 +10,7 @@ import { ml } from '../lib/ml';
 import { storage } from '../lib/storage';
 import { audit } from '../lib/audit';
 import { judgeAsset } from '../lib/asset-judgement';
+import { classifyCaptureSlot, slotSignalsFromLandmarks, type SlotGuess } from '../lib/asset-slot';
 
 /** 임베딩 산포 상한 — 초과 시 동일 인물이 아닌 자산 혼입 의심 (§17 CREZ-IDN-003) */
 const MAX_FACE_VARIANCE = 0.08;
@@ -37,6 +38,23 @@ async function assetQuality(data: AssetQualityJob) {
   const asset = await prisma.identityAsset.findUnique({ where: { id: data.assetId } });
   if (!asset) throw new CrezError(ErrorCode.IDN_NOT_FOUND, '자산 없음', data, 404);
 
+  // 슬롯 없이 올라온 사진은 먼저 분류한다. 수십·수백 장을 사람이 슬롯마다 고르게 할 수는 없다.
+  // 영상 자산은 슬롯 개념이 없으므로 건드리지 않는다.
+  const isImage = asset.assetType === 'FACE_IMAGE' || asset.assetType === 'BODY_IMAGE';
+  let prescanned: Awaited<ReturnType<typeof ml.embedFace | typeof ml.embedBody>> | null = null;
+  let slotGuess: SlotGuess | null = null;
+  if (asset.assetType === 'UNSORTED' || (isImage && !asset.captureSlot)) {
+    const classified = await classifyAndAssignSlot(asset, data.traceId, log);
+    if (!classified) {
+      // 분류하지 못한 사진은 사람이 슬롯을 정해 줄 때까지 둔다 — 억지로 끼워 넣으면 프로파일이 오염된다
+      return { ok: false, unclassified: true, reason: 'UNCLASSIFIED' };
+    }
+    asset.captureSlot = classified.captureSlot;
+    asset.assetType = classified.assetType;
+    prescanned = classified.res;
+    slotGuess = classified.guess;
+  }
+
   const isFace = asset.assetType === 'FACE_IMAGE';
   const isBody = asset.assetType === 'BODY_IMAGE';
   if (!isFace && !isBody) {
@@ -45,9 +63,11 @@ async function assetQuality(data: AssetQualityJob) {
     return { skipped: true };
   }
 
-  const res = isFace
-    ? await ml.embedFace({ imageKeys: [asset.storageKey], traceId: data.traceId })
-    : await ml.embedBody({ imageKeys: [asset.storageKey], traceId: data.traceId });
+  // 분류 단계에서 이미 같은 측정을 했으면 그걸 쓴다 — 수백 장을 올리는 경로라 호출을 두 번 하지 않는다.
+  const res = prescanned
+    ?? (isFace
+      ? await ml.embedFace({ imageKeys: [asset.storageKey], traceId: data.traceId })
+      : await ml.embedBody({ imageKeys: [asset.storageKey], traceId: data.traceId }));
 
   const r = res.results[0];
   const face = r && 'bbox' in r ? r : null;
@@ -78,7 +98,10 @@ async function assetQuality(data: AssetQualityJob) {
       qualityScore: quality,
       isUsable: verdict.usable,
       rejectReason: verdict.reason,
-      qualityDetail: verdict.detail,
+      // 자동 분류로 슬롯이 정해진 사진은 그 근거를 같이 남긴다 — 화면에서 확인 대상을 가려내야 한다.
+      qualityDetail: (slotGuess
+        ? { ...verdict.detail, autoSlot: true, classifierReason: slotGuess.reason, needsReview: slotGuess.needsReview }
+        : verdict.detail) as never,
       ...(face?.bbox ? { width: Math.round(face.bbox.w), height: Math.round(face.bbox.h) } : {}),
     },
   });
@@ -115,6 +138,78 @@ async function assetQuality(data: AssetQualityJob) {
 
   log.info({ quality, usable, reason: verdict.reason, detail: verdict.detail }, 'asset quality evaluated');
   return { ok: true, quality, usable, code: usable ? null : ErrorCode.IDN_ASSET_QUALITY, reason: verdict.reason };
+}
+
+/**
+ * 슬롯 없이 올라온 사진을 측정해 분류하고 자산에 반영한다.
+ *
+ * 얼굴 측정은 항상 하고, 얼굴이 작을 때만 전신 비율을 추가로 잰다 —
+ * 수백 장을 올리는 경로라 ML 호출을 필요한 만큼만 한다. 쓴 측정 결과는 그대로 돌려줘서
+ * 뒤따르는 품질 판정이 같은 이미지를 다시 재지 않게 한다.
+ *
+ * 분류하지 못하면 슬롯을 비워 둔 채 사유만 남긴다. 반신 사진처럼 어느 쪽도 아닌 사진이 여기 온다.
+ */
+async function classifyAndAssignSlot(
+  asset: { id: string; storageKey: string },
+  traceId: string,
+  log: ReturnType<typeof childLogger>,
+): Promise<{
+  captureSlot: string;
+  assetType: 'FACE_IMAGE' | 'BODY_IMAGE';
+  res: Awaited<ReturnType<typeof ml.embedFace | typeof ml.embedBody>>;
+  guess: SlotGuess;
+} | null> {
+  const faceRes = await ml.embedFace({ imageKeys: [asset.storageKey], traceId });
+  const f = faceRes.results[0];
+  const frameH = f?.imageHeight ?? 0;
+  const faceHeightRatio = f?.bbox && frameH ? f.bbox.h / frameH : null;
+  const hasFace = !!f?.ok && !!f.bbox;
+
+  // 얼굴이 화면에서 작으면 전신 사진일 수 있다. 그때만 전신 비율을 잰다.
+  let bodyRes: Awaited<ReturnType<typeof ml.embedBody>> | null = null;
+  let bodyInFrameRatio: number | null = null;
+  if (!hasFace || (faceHeightRatio ?? 0) < ASSET_QUALITY_POLICY.minFaceHeightRatio) {
+    bodyRes = await ml.embedBody({ imageKeys: [asset.storageKey], traceId });
+    bodyInFrameRatio = bodyRes.results[0]?.bodyInFrameRatio ?? null;
+  }
+
+  const signals = slotSignalsFromLandmarks(f?.landmarks ?? null, f?.bbox?.w ?? null);
+  const guess = classifyCaptureSlot({
+    hasFace, faceHeightRatio, bodyInFrameRatio,
+    signedNoseOffset: signals.signedNoseOffset,
+    eyeDistanceRatio: signals.eyeDistanceRatio,
+  });
+
+  if (!guess.slot || !guess.assetType) {
+    await prisma.identityAsset.update({
+      where: { id: asset.id },
+      data: {
+        isUsable: false,
+        rejectReason: 'UNCLASSIFIED',
+        qualityDetail: { ...guess.detail, classifierReason: guess.reason } as never,
+      },
+    });
+    log.info({ assetId: asset.id, reason: guess.reason }, '슬롯을 분류하지 못했다 — 사람이 정해야 한다');
+    return null;
+  }
+
+  // qualityDetail은 뒤이은 품질 판정이 덮어쓴다. 여기서는 슬롯만 정하고, 분류 근거는 호출자가 합쳐 넣는다.
+  await prisma.identityAsset.update({
+    where: { id: asset.id },
+    data: { captureSlot: guess.slot, assetType: guess.assetType },
+  });
+  log.info(
+    { assetId: asset.id, slot: guess.slot, needsReview: guess.needsReview },
+    `슬롯을 자동 분류했다 — ${guess.reason}`,
+  );
+  // 얼굴 슬롯은 얼굴 측정을, 전신 슬롯은 전신 측정을 그대로 넘긴다.
+  // 전신으로 분류됐다면 위에서 반드시 전신 측정을 했으므로 bodyRes가 있다.
+  return {
+    captureSlot: guess.slot,
+    assetType: guess.assetType,
+    res: guess.assetType === 'FACE_IMAGE' ? faceRes : (bodyRes ?? faceRes),
+    guess,
+  };
 }
 
 /**

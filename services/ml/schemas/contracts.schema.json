@@ -1420,6 +1420,12 @@
             "identityId": {
               "type": "string"
             },
+            "medianFaceHeightPx": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
             "faceSimilarity": {
               "type": "number"
             },
@@ -1962,6 +1968,12 @@
                 "properties": {
                   "identityId": {
                     "type": "string"
+                  },
+                  "medianFaceHeightPx": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   },
                   "faceSimilarity": {
                     "type": "number"
@@ -2682,6 +2694,14 @@
             "assignMinSimilarity": {
               "type": "number",
               "default": 0.35
+            },
+            "sequenceMaxSpread": {
+              "type": "number",
+              "default": 0.15
+            },
+            "minFaceHeightPx": {
+              "type": "number",
+              "default": 110
             }
           },
           "required": [

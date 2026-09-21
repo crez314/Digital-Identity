@@ -4,7 +4,11 @@ import { z } from 'zod';
 
 export const UserRole = z.enum(['OWNER', 'ADMIN', 'PRODUCER', 'OPERATOR', 'VIEWER']);
 export const IdentityStatus = z.enum(['DRAFT', 'ACTIVE', 'SUSPENDED', 'ARCHIVED']);
-export const AssetType = z.enum(['FACE_IMAGE', 'BODY_IMAGE', 'VIDEO', 'MOTION_VIDEO']);
+/**
+ * UNSORTED: 슬롯을 지정하지 않고 한꺼번에 올린 사진. 워커가 측정해 FACE_IMAGE/BODY_IMAGE로 바꾼다.
+ * 분류에 실패하면 UNSORTED로 남아 사람이 슬롯을 정해 줄 때까지 프로파일에 들어가지 않는다.
+ */
+export const AssetType = z.enum(['FACE_IMAGE', 'BODY_IMAGE', 'VIDEO', 'MOTION_VIDEO', 'UNSORTED']);
 export const CaptureSlot = z.enum([
   'FRONT', 'LEFT_45', 'RIGHT_45', 'LEFT_90', 'RIGHT_90', 'UP', 'DOWN',
   'BODY_FRONT', 'BODY_LEFT', 'BODY_RIGHT', 'BODY_BACK',
@@ -21,6 +25,7 @@ export const AssetRejectReason = z.enum([
   'NOT_FULL_BODY',      // 신체 슬롯인데 전신이 화면에 다 들어오지 않는다 — 얼굴·상반신 사진
   'BODY_FACE_MISSING',  // 전신 정면 슬롯인데 얼굴이 없다 — 다른 부위 사진
   'DEACTIVATED',        // 사용자가 삭제했으나 프로파일 재현을 위해 보존 — 재검사 대상이 아니다
+  'UNCLASSIFIED',       // 자동 분류가 각도·구도를 판단하지 못했다 — 사람이 슬롯을 지정해야 한다
 ]);
 /**
  * 출력 화면 비율 (§6.3). 미지정 시 16:9.

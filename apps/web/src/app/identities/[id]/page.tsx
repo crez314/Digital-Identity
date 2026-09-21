@@ -107,6 +107,11 @@ function exclusionReason(a: AssetRow): { short: string; long: string } {
       };
     case 'DEACTIVATED':
       return { short: '삭제됨(보존)', long: '삭제했지만 이미 프로파일 빌드에 쓰였을 수 있어 기록으로 보존합니다.' };
+    case 'UNCLASSIFIED':
+      return {
+        short: '분류 실패',
+        long: `${d.classifierReason ? String(d.classifierReason) : '각도와 구도를 판단하지 못했습니다'} — 아래에서 슬롯을 직접 지정하세요.`,
+      };
   }
   // 사유 컬럼 도입 전 판정 — 점수로만 추정한다
   if (a.qualityScore === 0) {
@@ -148,24 +153,32 @@ export default function IdentityDetail() {
   const refreshAssets = () => qc.invalidateQueries({ queryKey: ['identity-assets', id] });
 
   // presigned URL 발급 → 스토리지 직접 업로드 → 확정(품질 검사 큐 투입) (§6.1, §15)
+  //
+  // slot이 없으면 종류를 비워 올린다 — 워커가 측정해 정면·측면·전신으로 분류한다.
+  // 수십·수백 장을 사람이 슬롯마다 골라 넣게 하지 않기 위한 기본 경로다.
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const upload = useMutation({
-    mutationFn: async ({ slot, files }: { slot: string; files: File[] }) => {
+    mutationFn: async ({ slot, files }: { slot?: string; files: File[] }) => {
+      setUploadProgress({ done: 0, total: files.length });
       for (const file of files) {
         const contentType = file.type || 'application/octet-stream';
         await uploadViaPresignedUrl({
           file, contentType,
           requestUrl: async () => {
             const r = await post<{ assetId: string; uploadUrl: string }>(`/identities/${id}/assets/upload-url`, {
-              assetType: slot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE',
-              captureSlot: slot, contentType, fileName: file.name,
+              ...(slot
+                ? { assetType: slot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE', captureSlot: slot }
+                : {}),
+              contentType, fileName: file.name,
             });
             return { id: r.assetId, uploadUrl: r.uploadUrl };
           },
           confirm: (assetId, checksum) => post(`/identities/${id}/assets`, { assetId, checksum }),
         });
+        setUploadProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
       }
     },
-    onSettled: refreshAssets,
+    onSettled: () => { setUploadProgress(null); refreshAssets(); },
   });
 
   // 빌드에 쓰인 적 없는 자산은 실제로 지워지고, 쓰였을 수 있는 자산은 서버가 비활성화만 한다.
@@ -181,6 +194,7 @@ export default function IdentityDetail() {
     onSuccess: refreshAssets,
   });
   const [dragOverSlot, setDragOverSlot] = useState<string | null>(null);
+  const [bulkDragging, setBulkDragging] = useState(false);
 
   // 기준이 바뀌었거나 ML 오류로 실패한 자산을 다시 올리지 않고 현재 기준으로 다시 판정한다.
   const recheck = useMutation({
@@ -239,6 +253,11 @@ export default function IdentityDetail() {
     ? '빌드 진행 중'
     : null;
 
+  // 아직 슬롯이 정해지지 않은 사진 — 분류 대기 중이거나 분류에 실패한 것들
+  const unsorted = assetRows.filter((a) => a.captureSlot === null && a.rejectReason !== 'DEACTIVATED');
+  // 자동 분류가 경계에 걸려 사람이 한 번 봐야 하는 사진
+  const needsReview = assetRows.filter((a) => a.captureSlot !== null && a.qualityDetail?.needsReview === true);
+
   const slotTile = (slot: string, required: boolean) => {
     const slotAssets = assetRows.filter((a) => a.captureSlot === slot && a.previewUrl);
     const filled = cov?.filledSlots.includes(slot) ?? false;
@@ -294,6 +313,8 @@ export default function IdentityDetail() {
                   title={
                     st === 'EXCLUDED'
                       ? exclusionReason(a).long
+                      : a.qualityDetail?.needsReview === true
+                      ? `자동 분류가 경계에 걸렸습니다 — ${String(a.qualityDetail.classifierReason ?? '')} 틀렸으면 끌어다 옮기세요.`
                       : `${STATE_BADGE[st].label} · 품질 ${score(a.qualityScore)} — 끌어서 다른 슬롯으로 옮길 수 있습니다`
                   }
                 >
@@ -313,7 +334,9 @@ export default function IdentityDetail() {
                   <img
                     src={a.previewUrl ?? ''}
                     alt={`${slot} 자산`}
-                    className={`h-16 w-16 rounded object-cover ${st === 'EXCLUDED' ? 'opacity-30 grayscale' : ''}`}
+                    className={`h-16 w-16 rounded object-cover ${st === 'EXCLUDED' ? 'opacity-30 grayscale' : ''} ${
+                      a.qualityDetail?.needsReview === true ? 'ring-2 ring-amber-500' : ''
+                    }`}
                   />
                   <div
                     className={`mt-1 truncate text-center text-[10px] ${
@@ -377,6 +400,90 @@ export default function IdentityDetail() {
       </div>
 
       <ErrorBox error={removeIdentity.error ?? upload.error ?? remove.error ?? recheck.error ?? build.error ?? activate.error} />
+
+      {/* 기본 업로드 경로 — 한꺼번에 올리면 워커가 각도·구도를 재서 슬롯을 정한다 */}
+      <Card>
+        <h2 className="font-medium">사진 한꺼번에 올리기</h2>
+        <p className="mt-1 text-xs text-neutral-500">
+          슬롯을 고르지 않고 여러 장을 그대로 올리면 정면·45°·옆모습·전신으로 자동 분류합니다.
+          많이 올릴수록 기준 벡터가 두꺼워져 일치율이 올라갑니다. 판단이 어려운 사진만 아래에 모아 두니 직접 지정하세요.
+        </p>
+        <label
+          onDragOver={(e) => { e.preventDefault(); setBulkDragging(true); }}
+          onDragLeave={() => setBulkDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setBulkDragging(false);
+            // 슬롯 간 이동 드래그(text/asset-id)는 여기서 받지 않는다 — 파일만 처리한다
+            const files = [...e.dataTransfer.files].filter((f) => ACCEPT.includes(f.type));
+            if (files.length && !upload.isPending) upload.mutate({ files });
+          }}
+          className={`mt-3 flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-6 text-center transition ${
+            bulkDragging
+              ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30'
+              : 'border-neutral-300 hover:bg-neutral-50 dark:border-neutral-700 dark:hover:bg-neutral-900'
+          } ${upload.isPending ? 'cursor-not-allowed opacity-50' : ''}`}
+        >
+          <div className="text-sm font-medium">
+            {uploadProgress
+              ? `업로드 중… ${uploadProgress.done}/${uploadProgress.total}`
+              : '여기에 사진을 끌어다 놓거나 클릭해 고르세요'}
+          </div>
+          <div className="mt-1 text-xs text-neutral-500">JPG·PNG·WEBP · 같은 사람의 사진만 · 여러 장 한 번에</div>
+          <input
+            type="file"
+            accept={ACCEPT}
+            multiple
+            className="hidden"
+            disabled={upload.isPending}
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])];
+              e.target.value = '';
+              if (files.length) upload.mutate({ files });
+            }}
+          />
+        </label>
+
+        {unsorted.length > 0 ? (
+          <div className="mt-4">
+            <div className="text-sm font-medium">슬롯을 지정해야 하는 사진 {unsorted.length}장</div>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {unsorted.map((a) => (
+                <div key={a.id} className="w-28">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={a.previewUrl ?? ''}
+                    alt="분류되지 않은 사진"
+                    className="h-28 w-28 rounded object-cover"
+                    title={exclusionReason(a).long}
+                  />
+                  <div className="mt-1 line-clamp-2 text-[10px] text-neutral-500" title={exclusionReason(a).long}>
+                    {a.qualityDetail?.classifierReason ? String(a.qualityDetail.classifierReason) : '분류 중…'}
+                  </div>
+                  <select
+                    className="mt-1 w-full rounded border border-neutral-300 bg-transparent px-1 py-0.5 text-xs dark:border-neutral-700"
+                    defaultValue=""
+                    disabled={moveSlot.isPending}
+                    onChange={(e) => { if (e.target.value) moveSlot.mutate({ assetId: a.id, slot: e.target.value }); }}
+                  >
+                    <option value="">슬롯 지정…</option>
+                    {Object.entries(SLOT_LABELS).map(([slot, label]) => (
+                      <option key={slot} value={slot}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {needsReview.length > 0 ? (
+          <p className="mt-3 text-xs text-amber-600">
+            자동 분류가 경계에 걸린 사진 {needsReview.length}장이 있습니다 — 아래 슬롯에서 노란 테두리로 표시되며,
+            틀렸으면 끌어다 옮기세요.
+          </p>
+        ) : null}
+      </Card>
 
       {/* §6.1 캡처 슬롯 충족률 — 미충족이면 CREZ-IDN-001로 빌드가 거절된다 */}
       {cov ? (

@@ -89,7 +89,7 @@ model Identity {
 model IdentityAsset {
   id           String   @id @default(uuid()) @db.Uuid
   identityId   String   @map("identity_id") @db.Uuid
-  assetType    String   @map("asset_type") // FACE_IMAGE|BODY_IMAGE|VIDEO|MOTION_VIDEO
+  assetType    String   @map("asset_type") // FACE_IMAGE|BODY_IMAGE|VIDEO|MOTION_VIDEO|UNSORTED(자동 분류 대기)
   captureSlot  String?  @map("capture_slot")
   expression   String?
   storageKey   String   @map("storage_key")

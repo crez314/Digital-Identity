@@ -62,6 +62,9 @@ const ACCEPT = 'image/jpeg,image/png,image/webp';
 type AssetState = 'UPLOADING' | 'CHECKING' | 'USABLE' | 'EXCLUDED';
 
 function assetState(a: AssetRow): AssetState {
+  // 사유가 적혔으면 워커가 이미 판정한 자산이다 — 점수가 없어도 업로드 중으로 보면 안 된다.
+  // 분류 실패(UNCLASSIFIED)는 점수 없이 사유만 남으므로 이 줄이 없으면 "업로드 미완료"로 표시된다.
+  if (a.rejectReason) return 'EXCLUDED';
   if (a.previewUrl === null && !a.isUsable && a.qualityScore === null) return 'UPLOADING';
   if (a.isUsable && a.qualityScore === null) return 'CHECKING';
   return a.isUsable ? 'USABLE' : 'EXCLUDED';

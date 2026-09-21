@@ -157,6 +157,11 @@ export const PromptReferenceUploadRequest = z
   })
   .refine((v) => v.kind !== 'BACKGROUND' || v.slotIndex == null, {
     message: '배경은 특정 위치에 속하지 않습니다', path: ['slotIndex'],
+  })
+  // 시작 프레임은 구간 전체의 첫 장면이다. 워커가 치환하는 대상이 0번 위치의 대표 레퍼런스라
+  // (image-to-video의 시작 이미지는 1장뿐이다) 다른 위치를 받으면 조용히 무시되는 값이 된다.
+  .refine((v) => v.kind !== 'START_FRAME' || v.slotIndex == null || v.slotIndex === 0, {
+    message: '시작 프레임은 구간 전체에 적용됩니다 — 위치를 지정할 수 없습니다', path: ['slotIndex'],
   });
 
 /** POST .../references/{referenceId}/confirm — 업로드 완료 확정 */

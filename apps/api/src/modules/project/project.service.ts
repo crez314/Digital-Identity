@@ -506,8 +506,11 @@ export class ProjectService {
   }
 
   /**
-   * 참고 이미지(배경·의상·헤어) 업로드 URL 발급 — 인물 자산과 같은 presigned PUT 흐름(§15).
+   * 참고 이미지 업로드 URL 발급 — 인물 자산과 같은 presigned PUT 흐름(§15).
    * 확정 전에는 checksum='pending'으로 두어 생성에 섞이지 않게 한다.
+   *
+   * 배경·의상·헤어는 제공자에게 넘기는 첨부고, START_FRAME은 image-to-video의 시작 프레임
+   * 자체를 사람이 지정하는 것이라 워커가 첨부가 아니라 치환으로 다룬다.
    */
   async createReferenceUploadUrl(
     user: AuthUser, projectId: string, segmentId: string, input: PromptReferenceUploadRequest,
@@ -518,6 +521,20 @@ export class ProjectService {
       throw new CrezError(
         ErrorCode.PRJ_INVALID_STATE, `참고 이미지는 구간당 ${MAX_REFERENCES_PER_SEGMENT}장까지 첨부할 수 있습니다`, { count }, 409,
       );
+    }
+    // 시작 프레임은 구간당 하나다. 둘이면 워커가 먼저 올린 쪽을 말없이 골라 쓰고,
+    // 화면에는 둘 다 붙어 있어서 어느 것이 쓰였는지 설명할 수 없다.
+    if (input.kind === 'START_FRAME') {
+      const existing = await this.prisma.segmentReference.count({
+        where: { segmentId, active: true, kind: 'START_FRAME' },
+      });
+      if (existing > 0) {
+        throw new CrezError(
+          ErrorCode.PRJ_INVALID_STATE,
+          '시작 프레임은 구간당 한 장입니다 — 기존 시작 프레임을 지운 뒤 올리세요',
+          { segmentId }, 409,
+        );
+      }
     }
     const referenceId = randomUUID();
     const key = storageKey.segmentReference(projectId, segmentId, referenceId, REFERENCE_EXT[input.contentType]);

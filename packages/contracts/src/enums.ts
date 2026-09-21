@@ -14,8 +14,15 @@ export const CaptureSlot = z.enum([
   'BODY_FRONT', 'BODY_LEFT', 'BODY_RIGHT', 'BODY_BACK',
 ]);
 export const Expression = z.enum(['NEUTRAL', 'SMILE', 'SERIOUS', 'SINGING', 'TALKING', 'PERFORMANCE']);
-/** 세그먼트 프롬프트에 붙이는 참고 이미지 종류 */
-export const PromptReferenceKind = z.enum(['BACKGROUND', 'OUTFIT', 'HAIR']);
+/**
+ * 세그먼트에 붙이는 참고 이미지 종류.
+ *
+ * START_FRAME만 성격이 다르다. 나머지는 제공자에게 "참고하라"고 넘기는 첨부지만,
+ * START_FRAME은 image-to-video의 **시작 프레임 자체**를 사람이 지정하는 것이다.
+ * 첨부로 넘기면 안 된다 — kling처럼 이미지를 1장만 받는 제공자는 인물 레퍼런스가
+ * 그 한 자리를 차지해 첨부가 통째로 버려진다(§12.1). 워커가 시작 프레임으로 치환한다.
+ */
+export const PromptReferenceKind = z.enum(['BACKGROUND', 'OUTFIT', 'HAIR', 'START_FRAME']);
 /** 자산 품질검사 제외 사유 (§17 CREZ-IDN-002의 세부) */
 export const AssetRejectReason = z.enum([
   'NO_FACE',            // 얼굴 슬롯에서 얼굴 미검출

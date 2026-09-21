@@ -76,3 +76,29 @@ describe('프롬프트 참고 이미지 (배경·의상·헤어)', () => {
       .rejects.toMatchObject({ code: ErrorCode.PRJ_INVALID_STATE, httpStatus: 409 });
   });
 });
+
+/**
+ * 시작 프레임 지정 (§12.1).
+ *
+ * image-to-video의 시작 이미지는 1장뿐이라, 의상을 바꾸려면 그 1장을 사람이 지정해야 한다.
+ * 첨부(OUTFIT)로 넘기면 인물 레퍼런스가 그 자리를 차지해 통째로 버려진다 — 그래서 별도 종류다.
+ */
+describe('시작 프레임 지정', () => {
+  it('요청 계약: 위치를 지정할 수 없다 — 구간 전체의 첫 장면이다', () => {
+    const base = { kind: 'START_FRAME' as const, contentType: 'image/jpeg' as const, fileName: 's.jpg' };
+    expect(PromptReferenceUploadRequest.safeParse(base).success).toBe(true);
+    expect(PromptReferenceUploadRequest.safeParse({ ...base, slotIndex: 0 }).success).toBe(true);
+    expect(PromptReferenceUploadRequest.safeParse({ ...base, slotIndex: 1 }).success).toBe(false);
+  });
+
+  it('구간당 한 장만 받는다 — 두 장이면 어느 것이 쓰였는지 설명할 수 없다', async () => {
+    const { svc, prisma } = setup();
+    prisma.segmentReference.count = vi.fn()
+      .mockResolvedValueOnce(1)   // 전체 첨부 수 — 한도 미만
+      .mockResolvedValueOnce(1);  // 이미 있는 START_FRAME
+    await expect(
+      svc.createReferenceUploadUrl(user, 'p1', 's1', { kind: 'START_FRAME', contentType: 'image/jpeg', fileName: 's.jpg' }),
+    ).rejects.toMatchObject({ code: ErrorCode.PRJ_INVALID_STATE, httpStatus: 409 });
+    expect(prisma.segmentReference.create).not.toHaveBeenCalled();
+  });
+});

@@ -1,7 +1,16 @@
 import type { GenerationRequest, ImagePlan, PlannedImage } from './types';
 
 /** 같은 위치 안에서는 의상 → 헤어, 위치가 정해진 첨부 → 전원 공통 → 배경 순으로 자리를 준다 */
-const KIND_ORDER = { OUTFIT: 0, HAIR: 1, BACKGROUND: 2 } as const;
+const KIND_ORDER: Record<string, number> = { OUTFIT: 0, HAIR: 1, BACKGROUND: 2 };
+
+/**
+ * 모르는 종류는 맨 뒤로 보낸다.
+ *
+ * 직접 인덱싱하면 새 종류가 생겼을 때 undefined가 나오고 뺄셈이 NaN이 되어 비교자가 망가진다.
+ * 그러면 정렬이 실패를 알리지 않은 채 **모든 첨부의 순서**가 엉킨다.
+ * (START_FRAME은 첨부가 아니라 워커가 시작 프레임으로 치환하므로 여기까지 오지 않는다.)
+ */
+const kindOrder = (kind: string): number => KIND_ORDER[kind] ?? Number.MAX_SAFE_INTEGER;
 
 /**
  * 제공자가 받는 이미지 수(max) 안에서 인물 신원 레퍼런스와 프롬프트 참고 이미지를 배분한다.
@@ -35,7 +44,7 @@ export function planImages(req: GenerationRequest, max: number): ImagePlan {
     .filter((a) => a.signedUrl)
     .map((a, order) => ({ a, order }))
     .sort((x, y) =>
-      KIND_ORDER[x.a.kind] - KIND_ORDER[y.a.kind]
+      kindOrder(x.a.kind) - kindOrder(y.a.kind)
       || (x.a.slotIndex ?? Number.MAX_SAFE_INTEGER) - (y.a.slotIndex ?? Number.MAX_SAFE_INTEGER)
       || x.order - y.order,
     )

@@ -21,12 +21,26 @@ import { downloadTo, presignedGet, uploadFrom } from './media-io';
 /** 이어 붙인 시작 프레임의 가짜 assetId 접두사 — 실제 identity_asset 행이 아니다 */
 export const CHAIN_ASSET_PREFIX = 'chain:';
 
+/** 사람이 지정한 시작 프레임의 가짜 assetId 접두사 — 이것도 identity_asset 행이 아니다 */
+export const PINNED_ASSET_PREFIX = 'pin:';
+
 /**
  * 이어 붙인 시작 프레임인가.
  * 이 id는 identity_asset에 없으므로 자산 조회에 넣으면 안 된다 — UUID가 아니라 조회 자체가 터진다.
  */
 export function isChainAsset(assetId: string): boolean {
   return assetId.startsWith(CHAIN_ASSET_PREFIX);
+}
+
+/**
+ * identity_asset 행이 아닌 가짜 assetId인가 — 이어 붙인 프레임과 사람이 지정한 프레임.
+ *
+ * 이 id가 자산 조회에 섞이면 UUID 컬럼 파싱에서 조회가 통째로 터진다. 그 조회는 생성이
+ * **성공한 뒤** 결과를 거둬들이는 경로에 있어서, 돈은 이미 나갔는데 결과물만 잃는다
+ * (2026-09-17 실측). 그래서 기록할 때와 읽을 때 양쪽에서 걸러야 한다.
+ */
+export function isSyntheticAsset(assetId: string): boolean {
+  return isChainAsset(assetId) || assetId.startsWith(PINNED_ASSET_PREFIX);
 }
 
 /**

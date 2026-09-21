@@ -20,6 +20,15 @@ const PENDING_CHECK = {
 } satisfies Prisma.IdentityAssetUpdateInput;
 
 /**
+ * 슬롯을 다룰 수 있는 자산 종류.
+ *
+ * UNSORTED는 자동 분류가 각도·구도를 판단하지 못해 사람이 슬롯을 정해 줘야 하는 사진이다(§8.1 확장).
+ * 썸네일 발급·슬롯 이동·재검사가 모두 이 목록을 써야 구제 경로가 끊기지 않는다 —
+ * 하나라도 빠지면 화면에는 "슬롯을 지정하세요"라고 띄워 놓고 지정할 수단이 없는 상태가 된다.
+ */
+const SLOTTABLE_ASSET_TYPES = ['FACE_IMAGE', 'BODY_IMAGE', 'UNSORTED'];
+
+/**
  * 워커가 판정한 자산인지 — 사용자가 직접 뺀 자산은 재검사로 되살리지 않는다.
  * reject_reason 도입 전에 제외된 자산은 사유가 없으므로 점수로 구분한다(자동 제외는 0점 또는 하한 미달).
  */
@@ -244,7 +253,7 @@ export class IdentityService {
         qualityDetail: (a.qualityDetail as Record<string, unknown> | null) ?? null,
         // checksum이 'pending'이면 업로드 URL만 발급되고 객체는 아직 없다.
         previewUrl:
-          a.checksum !== 'pending' && (a.assetType === 'FACE_IMAGE' || a.assetType === 'BODY_IMAGE')
+          a.checksum !== 'pending' && SLOTTABLE_ASSET_TYPES.includes(a.assetType)
             ? (await this.s3.presignGet(a.storageKey)).url
             : null,
       }))),
@@ -331,7 +340,7 @@ export class IdentityService {
 
     const assets = await this.prisma.identityAsset.findMany({
       // UNSORTED도 포함한다 — 분류에 실패한 사진을 기준이 바뀐 뒤 다시 시도할 수 있어야 한다
-      where: { identityId, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE', 'UNSORTED'] }, checksum: { not: 'pending' } },
+      where: { identityId, assetType: { in: SLOTTABLE_ASSET_TYPES }, checksum: { not: 'pending' } },
     });
     const targets = assets.filter((a) => isAutoJudged(a));
 
@@ -372,7 +381,7 @@ export class IdentityService {
 
     const asset = await this.prisma.identityAsset.findFirst({ where: { id: assetId, identityId } });
     if (!asset) throw new CrezError(ErrorCode.IDN_NOT_FOUND, '자산을 찾을 수 없음', { assetId }, 404);
-    if (!['FACE_IMAGE', 'BODY_IMAGE'].includes(asset.assetType)) {
+    if (!SLOTTABLE_ASSET_TYPES.includes(asset.assetType)) {
       throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '이미지 자산만 슬롯을 옮길 수 있습니다', { assetId }, 422);
     }
     if (asset.checksum === 'pending') {

@@ -16,7 +16,9 @@ import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
-import { buildChainStartFrame, CHAIN_ASSET_PREFIX, isChainAsset, shouldChain } from '../lib/chain-start';
+import {
+  buildChainStartFrame, CHAIN_ASSET_PREFIX, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
+} from '../lib/chain-start';
 
 /**
  * generation 큐 (§8, §12).
@@ -258,11 +260,56 @@ async function submit(data: GenerationJobPayload) {
     ];
   }
 
-  // 프롬프트 참고 이미지(배경·의상·헤어). 업로드가 확정되고 삭제되지 않은 것만 쓴다.
-  const promptRefs = await prisma.segmentReference.findMany({
+  // 세그먼트에 붙인 이미지. 업로드가 확정되고 삭제되지 않은 것만 쓴다.
+  const segmentRefs = await prisma.segmentReference.findMany({
     where: { segmentId: segment.id, active: true, checksum: { not: 'pending' } },
     orderBy: { createdAt: 'asc' },
   });
+
+  // 시작 프레임은 첨부가 아니다 — 첨부로 넘기면 이미지를 1장만 받는 제공자(kling 등)에서
+  // 인물 레퍼런스가 그 한 자리를 차지해 통째로 버려진다. 갈라내서 시작 프레임으로 치환한다.
+  const pinnedRef = segmentRefs.find((r) => r.kind === 'START_FRAME') ?? null;
+  const promptRefs = segmentRefs.filter((r) => r.kind !== 'START_FRAME');
+
+  if (pinnedRef && castWithRefs[0]) {
+    // 사람이 "이 이미지로 시작하라"고 지정한 것이다. 주소를 만들지 못했을 때 조용히 인물 사진으로
+    // 되돌리면, 지정한 의상·구도와 다른 영상이 돈만 쓰고 나온다. 그래서 여기서는 실패시킨다.
+    const url = await presignedGet(pinnedRef.storageKey).catch((e) => {
+      log.error({ err: String(e), referenceId: pinnedRef.id }, '지정한 시작 프레임의 주소를 만들지 못했다');
+      return null;
+    });
+    if (!url) {
+      await failRouting(segment.id, project.id, data, new CrezError(
+        ErrorCode.GEN_PROVIDER_ERROR,
+        '지정한 시작 프레임을 읽을 수 없습니다 — 다시 업로드한 뒤 실행하세요',
+        { referenceId: pinnedRef.id, storageKey: pinnedRef.storageKey }, 422,
+      ));
+      return { failed: true, code: ErrorCode.GEN_PROVIDER_ERROR };
+    }
+    if (chain) {
+      log.info({ referenceId: pinnedRef.id },
+        '사람이 지정한 시작 프레임이 이어 붙이기보다 우선한다 — 이어 붙인 프레임은 쓰지 않는다');
+    }
+    castWithRefs[0].references = [
+      {
+        identityId: castWithRefs[0].identityId,
+        assetId: `${PINNED_ASSET_PREFIX}${pinnedRef.id}`,
+        storageKey: pinnedRef.storageKey,
+        signedUrl: url,
+        captureSlot: null,
+        expression: null,
+        quality: null,
+        lead: true,
+      },
+      // 인물 레퍼런스는 뒤에 남겨 둔다 — 이미지를 여러 장 받는 제공자는 신원 근거로 함께 쓴다
+      ...castWithRefs[0].references.map((r) => ({ ...r, lead: false })),
+    ];
+    // 구간별 레퍼런스 회전(§5.1)은 이 구간에 적용되지 않는다. 여러 구간에 같은 프레임을 지정하면
+    // 모든 컷이 같은 장면으로 시작하므로, 나중에 원인을 찾을 수 있게 남긴다.
+    log.info({ referenceId: pinnedRef.id, segmentIndex: segment.segmentIndex },
+      '사람이 지정한 시작 프레임으로 시작한다 — 이 구간은 레퍼런스 회전을 쓰지 않는다');
+  }
+
   const attachments: PromptAttachment[] = await Promise.all(
     promptRefs.map(async (r) => ({
       referenceId: r.id,
@@ -347,12 +394,15 @@ async function submit(data: GenerationJobPayload) {
         strategy: data.strategy ?? null,
         references: castWithRefs.map((c) => ({
           identityId: c.identityId,
-          // 이어 붙인 시작 프레임은 identity_asset 행이 아니다 — 여기 섞으면 결과 조회 때
-          // 자산을 UUID로 되찾는 과정에서 통째로 실패한다(2026-09-17 실측).
-          assetIds: c.references.map((r) => r.assetId).filter((id) => !isChainAsset(id)),
+          // 이어 붙인 시작 프레임과 사람이 지정한 시작 프레임은 identity_asset 행이 아니다 —
+          // 여기 섞으면 결과 조회 때 자산을 UUID로 되찾는 과정에서 통째로 실패한다(2026-09-17 실측).
+          assetIds: c.references.map((r) => r.assetId).filter((id) => !isSyntheticAsset(id)),
         })),
         // 이어 붙인 사실은 따로 남긴다 — 나중에 "이 컷은 무엇에서 이어졌나"를 설명할 수 있어야 한다
         chainStart: chain ? { fromSegmentId: chain.fromSegmentId, storageKey: chain.storageKey } : null,
+        // 지정한 시작 프레임도 마찬가지다. 첨부가 아니라 치환이라 droppedReferenceIds에 잡히지 않으므로,
+        // 이 기록이 없으면 "지정한 이미지가 쓰였는가"를 화면에서 답할 방법이 없다.
+        pinnedStart: pinnedRef ? { referenceId: pinnedRef.id, storageKey: pinnedRef.storageKey } : null,
         attachments: attachments.map((a) => ({ referenceId: a.referenceId, kind: a.kind, slotIndex: a.slotIndex })),
         imagePlan: {
           images: imagePlan.images.map(({ url: _url, ...rest }) => rest),
@@ -567,9 +617,9 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
 
   const cast = await Promise.all(
     j.segment.project.cast.map(async (c) => {
-      // 과거 기록에 섞여 들어간 비-UUID(이어 붙이기 가짜 id)도 걸러 낸다
+      // 과거 기록에 섞여 들어간 비-UUID(이어 붙이기·지정 시작 프레임의 가짜 id)도 걸러 낸다
       const assetIds = (savedRefs.find((r) => r.identityId === c.identityId)?.assetIds ?? [])
-        .filter((id) => !isChainAsset(id));
+        .filter((id) => !isSyntheticAsset(id));
       const assets = assetIds.length
         ? await prisma.identityAsset.findMany({ where: { id: { in: assetIds } } })
         : [];

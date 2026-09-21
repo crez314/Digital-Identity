@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { CHAIN_ASSET_PREFIX, isChainAsset, shouldChain } from '../lib/chain-start';
+import {
+  CHAIN_ASSET_PREFIX, isChainAsset, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
+} from '../lib/chain-start';
 
 /**
  * 컷 없이 이어지는 장면은 앞 구간의 마지막 프레임에서 출발한다.
@@ -52,5 +54,30 @@ describe('이어 붙인 시작 프레임의 id', () => {
     // identity_asset에 없는 값이라 UUID 파싱 단계에서 터진다.
     expect(isChainAsset(`${CHAIN_ASSET_PREFIX}370c922b-f5fc-44cb-b38c-668a684f9e03`)).toBe(true);
     expect(isChainAsset('370c922b-f5fc-44cb-b38c-668a684f9e03')).toBe(false);
+  });
+});
+
+/**
+ * 가짜 assetId 걸러 내기.
+ *
+ * 이어 붙인 프레임과 사람이 지정한 프레임은 identity_asset 행이 아니다. 이 id가 자산 조회에
+ * 섞이면 UUID 컬럼 파싱에서 조회가 통째로 터지는데, 그 조회는 생성이 **성공한 뒤** 결과를
+ * 거둬들이는 경로에 있다 — 돈은 이미 나갔는데 결과물만 잃는다(2026-09-17 실측).
+ */
+describe('identity_asset이 아닌 가짜 id', () => {
+  it('이어 붙인 프레임을 걸러 낸다', () => {
+    expect(isSyntheticAsset(`${CHAIN_ASSET_PREFIX}seg-1`)).toBe(true);
+  });
+
+  it('사람이 지정한 시작 프레임도 걸러 낸다', () => {
+    expect(isSyntheticAsset(`${PINNED_ASSET_PREFIX}ref-1`)).toBe(true);
+  });
+
+  it('진짜 자산 UUID는 통과시킨다', () => {
+    expect(isSyntheticAsset('3f2504e0-4f89-11d3-9a0c-0305e82c3301')).toBe(false);
+  });
+
+  it('두 접두사는 서로 겹치지 않는다 — 지정 프레임을 이어 붙이기로 오인하면 이력이 틀어진다', () => {
+    expect(isChainAsset(`${PINNED_ASSET_PREFIX}ref-1`)).toBe(false);
   });
 });

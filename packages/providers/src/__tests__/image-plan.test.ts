@@ -73,3 +73,22 @@ describe('구간별 대표 이미지', () => {
     expect(urls(r)).toEqual(['a4', 'a1', 'a2']);
   });
 });
+
+/**
+ * 종류 정렬은 모르는 값에 부딪혀도 망가지면 안 된다.
+ *
+ * KIND_ORDER를 직접 인덱싱하면 새 종류에서 undefined가 나오고 뺄셈이 NaN이 된다.
+ * NaN 비교자는 예외를 던지지 않고 "정렬은 했는데 순서는 아무거나"인 상태를 만들어,
+ * 기존 의상·헤어·배경 배치까지 조용히 흐트러진다.
+ */
+describe('모르는 첨부 종류', () => {
+  it('알려진 종류의 상대 순서는 그대로 유지된다', () => {
+    const unknown = { ...ref('X', 'OUTFIT', null), kind: 'FUTURE_KIND' } as unknown as PromptAttachment;
+    const plan = planImages(
+      request([person('A', 0, 1)], [ref('bg', 'BACKGROUND', null), unknown, ref('fit', 'OUTFIT', 0)]),
+      4,
+    );
+    // 얼굴 먼저, 그다음 의상 → 배경. 모르는 종류는 맨 뒤로 밀린다.
+    expect(urls(plan)).toEqual(['A1', 'fit', 'bg', 'X']);
+  });
+});

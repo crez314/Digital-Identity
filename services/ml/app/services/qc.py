@@ -99,6 +99,7 @@ def score(
     source_tracks_key: str | None,
     sample_fps: float = 5,
     assign_min_similarity: float = 0.35,
+    cohort: list[list[float]] | None = None,
 ) -> dict:
     """
     생성 결과를 독립적으로 다시 트래킹하고(§9.2), track 단위로 identity를 할당한 뒤
@@ -106,6 +107,13 @@ def score(
 
     references[].faceCentroid는 필수, bodyCentroid는 선택이다. 신체 기준이 없으면
     신체 지표는 None으로 반환하고, 상위 계층이 가중치를 재분배한다.
+
+    cohort는 "이 인물이 아닌 사람들"의 얼굴 centroid다(대조군). 판정에는 쓰지 않고 —
+    track 할당에도 넣지 않는다 — 같은 프레임이 남에게는 몇 점을 받는지만 함께 잰다.
+    코사인 유사도의 절대값은 그 자체로 뜻이 없다. 자세·표정이 조금만 흐트러져도 내려가서,
+    본인 사진조차 고개를 돌리면 0.25까지 떨어진다. "낮다"고 말하려면 남이 몇 점인지를
+    알아야 한다 — 그 차이(margin)가 실제 판별력이고, 합격선은 거기서 나와야 한다.
+    (2026-09-21 실측: 같은 영상이 본인에게 0.59, 다른 인물에게 -0.04)
 
     assign_min_similarity는 호출자(ruleset)가 정하는 τ_assign이다. assign()은 설계상
     확정 판정을 하지 않고 Hungarian 최적 짝만 돌려주며, 짝을 못 찾은 track에는 가장
@@ -128,6 +136,9 @@ def score(
         for r in references
         if r.get("bodyCentroid")
     }
+
+    # 대조군은 할당에 넣지 않는다 — 넣으면 track이 남의 인물로 배정되어 지표가 망가진다
+    cohort_vecs = [np.array(c, dtype=np.float32) for c in (cohort or [])]
 
     from .assign import assign as assign_tracks
 
@@ -161,6 +172,7 @@ def score(
         face_deltas: list[float] = []
         body_deltas: list[float] = []
         face_heights: list[float] = []
+        cohort_sims: list[tuple[float, float]] = []
         valid = 0
         total = 0
         prev_face: np.ndarray | None = None
@@ -213,6 +225,9 @@ def score(
                         face_deltas.append(face_delta)
                     prev_face = vec
                     face_sims.append(face_sim)
+                    # 같은 프레임이 대조군에게 받는 최고점 — 본인 점수와 나란히 봐야 뜻이 생긴다
+                    if cohort_vecs:
+                        cohort_sims.append((max(cosine(vec, cv) for cv in cohort_vecs), max(quality, 0.05)))
                     valid += 1
 
                 # ── 신체 (얼굴과 독립) ─────────────────────
@@ -275,6 +290,9 @@ def score(
             "bindingStability": float(min(1.0, assigned_ms / total_span)),
             # 판정 근거의 두께 — 얼굴이 몇 픽셀이었는지. 상위 계층이 "판정 곤란"을 구분하는 데 쓴다
             "medianFaceHeightPx": float(np.median(face_heights)) if face_heights else None,
+            # 대조군이 같은 프레임에서 받은 점수(품질 가중). 대조군을 안 넘기면 None이다.
+            # 판정은 하지 않는다 — 상위 계층이 본인 점수와의 차이로 판별력을 본다(§2.2).
+            "cohortFaceSimilarity": _weighted_mean(cohort_sims) if cohort_sims else None,
             "validFrameRatio": float(valid / total) if total else 0.0,
             "series": series,
             "trackSpans": [

@@ -1429,6 +1429,12 @@
             "faceSimilarity": {
               "type": "number"
             },
+            "cohortFaceSimilarity": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
             "bodySimilarity": {
               "type": [
                 "number",
@@ -1936,6 +1942,15 @@
               "type": "number",
               "default": 0.35
             },
+            "cohort": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
             "traceId": {
               "type": "string"
             }
@@ -1977,6 +1992,12 @@
                   },
                   "faceSimilarity": {
                     "type": "number"
+                  },
+                  "cohortFaceSimilarity": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   },
                   "bodySimilarity": {
                     "type": [

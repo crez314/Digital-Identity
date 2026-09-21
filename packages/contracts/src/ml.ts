@@ -201,6 +201,15 @@ export const QcScoreRequest = z.object({
    * 정책은 ruleset이 정하고(qc_ruleset.thresholds.assignMinSimilarity), crez-ml은 그대로 적용만 한다(§7).
    */
   assignMinSimilarity: z.number().default(0.35),
+  /**
+   * 대조군 — "이 인물이 아닌 사람들"의 얼굴 centroid.
+   *
+   * track 할당에는 쓰지 않는다(넣으면 track이 남의 인물로 배정되어 지표가 망가진다).
+   * 같은 프레임이 남에게 몇 점을 받는지만 함께 재기 위한 것이다. 코사인 유사도의 절대값은
+   * 그 자체로 뜻이 없다 — 자세·표정이 흐트러지면 본인 사진조차 0.25까지 내려간다.
+   * "낮다"고 말하려면 남이 몇 점인지 알아야 하고, 그 차이가 실제 판별력이다.
+   */
+  cohort: z.array(z.array(z.number())).optional(),
   traceId: z.string().optional(),
 });
 
@@ -212,6 +221,12 @@ export const PerIdentityRawMetrics = z.object({
    */
   medianFaceHeightPx: z.number().nullable().optional(),
   faceSimilarity: z.number(),
+  /**
+   * 대조군이 같은 프레임에서 받은 얼굴 유사도(품질 가중). 대조군을 넘기지 않으면 null.
+   * 이 값과 faceSimilarity의 차이가 "이 영상이 그 사람인가"의 실제 판별력이다 —
+   * 판정은 하지 않는다(§2.2). 2026-09-21 실측: 본인 0.59 / 대조군 -0.04.
+   */
+  cohortFaceSimilarity: z.number().nullable().optional(),
   /** 신체 기준 벡터가 없으면 null — 상위 계층이 가중치를 재분배한다 */
   bodySimilarity: z.number().nullable(),
   temporalConsistency: z.number(),

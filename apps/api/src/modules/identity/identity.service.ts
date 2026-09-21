@@ -330,14 +330,21 @@ export class IdentityService {
     }
 
     const assets = await this.prisma.identityAsset.findMany({
-      where: { identityId, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE'] }, checksum: { not: 'pending' } },
+      // UNSORTED도 포함한다 — 분류에 실패한 사진을 기준이 바뀐 뒤 다시 시도할 수 있어야 한다
+      where: { identityId, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE', 'UNSORTED'] }, checksum: { not: 'pending' } },
     });
     const targets = assets.filter((a) => isAutoJudged(a));
 
     for (const a of targets) {
-      await this.prisma.identityAsset.update({ where: { id: a.id }, data: PENDING_CHECK });
+      const manualSlot = (a.qualityDetail as { manualSlot?: boolean } | null)?.manualSlot === true;
+      await this.prisma.identityAsset.update({
+        where: { id: a.id },
+        // 사람이 정한 슬롯이라는 표시는 살려 둔다 — 재분류가 그 판단을 되돌리면 안 된다
+        data: { ...PENDING_CHECK, ...(manualSlot ? { qualityDetail: { manualSlot: true } } : {}) },
+      });
+      // 재검사는 판정만이 아니라 슬롯도 다시 본다 — 한 슬롯에 몰아 올린 사진이 제자리를 찾아간다
       await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
-        traceId, orgId: user.orgId, identityId, assetId: a.id,
+        traceId, orgId: user.orgId, identityId, assetId: a.id, reclassify: true,
       });
     }
 
@@ -385,7 +392,9 @@ export class IdentityService {
 
     await this.prisma.identityAsset.update({
       where: { id: assetId },
-      data: { captureSlot, assetType, ...PENDING_CHECK },
+      // manualSlot: 사람이 정한 슬롯이라는 표시. 재검사의 자동 재분류가 이 사진은 건드리지 않는다 —
+      // 자동 분류가 사람의 판단을 되돌리면 고쳐 놓을 방법이 없다.
+      data: { captureSlot, assetType, ...PENDING_CHECK, qualityDetail: { manualSlot: true } },
     });
     await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
       traceId, orgId: user.orgId, identityId, assetId,

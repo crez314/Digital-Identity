@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { classifyCaptureSlot, slotSignalsFromLandmarks, type SlotMeasurement } from '../lib/asset-slot';
+import {
+  classifyCaptureSlot, shouldClassifySlot, slotSignalsFromLandmarks, type SlotMeasurement,
+} from '../lib/asset-slot';
 
 /**
  * 2026-09-21 CRZ-A008 실측값을 그대로 고정한다. 사람이 붙인 라벨과 분류 결과가 같아야 한다.
@@ -96,5 +98,38 @@ describe('랜드마크에서 신호 뽑기', () => {
   it('랜드마크가 모자라면 null이다', () => {
     expect(slotSignalsFromLandmarks(null, 100).signedNoseOffset).toBeNull();
     expect(slotSignalsFromLandmarks([[0, 0]], 100).signedNoseOffset).toBeNull();
+  });
+});
+
+/**
+ * 재검사가 슬롯을 다시 보는 규칙.
+ *
+ * 사진을 한 슬롯(주로 정면)에 몰아 올린 뒤 재검사로 제자리에 보내는 것이 이 기능의 목적이다.
+ * 동시에, 사람이 직접 옮긴 사진을 자동 분류가 되돌리면 "옮겨도 다시 돌아오는" 화면이 된다.
+ */
+describe('다시 분류할 대상 고르기', () => {
+  const a = (over: Partial<Parameters<typeof shouldClassifySlot>[0]> = {}) => ({
+    assetType: 'FACE_IMAGE', captureSlot: 'FRONT', ...over,
+  });
+
+  it('슬롯 없이 올린 사진은 언제나 분류한다', () => {
+    expect(shouldClassifySlot(a({ assetType: 'UNSORTED', captureSlot: null }))).toBe(true);
+    expect(shouldClassifySlot(a({ captureSlot: null }))).toBe(true);
+  });
+
+  it('평소 재검사는 이미 정해진 슬롯을 건드리지 않는다', () => {
+    expect(shouldClassifySlot(a(), false)).toBe(false);
+  });
+
+  it('다시 분류를 요청하면 이미 정해진 슬롯도 다시 본다', () => {
+    expect(shouldClassifySlot(a(), true)).toBe(true);
+  });
+
+  it('사람이 직접 옮긴 슬롯은 다시 분류해도 그대로 둔다', () => {
+    expect(shouldClassifySlot(a({ qualityDetail: { manualSlot: true } }), true)).toBe(false);
+  });
+
+  it('영상 자산은 슬롯 개념이 없어 대상이 아니다', () => {
+    expect(shouldClassifySlot(a({ assetType: 'VIDEO', captureSlot: null }), true)).toBe(false);
   });
 });

@@ -10,7 +10,7 @@ import { ml } from '../lib/ml';
 import { storage } from '../lib/storage';
 import { audit } from '../lib/audit';
 import { judgeAsset } from '../lib/asset-judgement';
-import { classifyCaptureSlot, slotSignalsFromLandmarks, type SlotGuess } from '../lib/asset-slot';
+import { classifyCaptureSlot, shouldClassifySlot, slotSignalsFromLandmarks, type SlotGuess } from '../lib/asset-slot';
 
 /** 임베딩 산포 상한 — 초과 시 동일 인물이 아닌 자산 혼입 의심 (§17 CREZ-IDN-003) */
 const MAX_FACE_VARIANCE = 0.08;
@@ -40,10 +40,15 @@ async function assetQuality(data: AssetQualityJob) {
 
   // 슬롯 없이 올라온 사진은 먼저 분류한다. 수십·수백 장을 사람이 슬롯마다 고르게 할 수는 없다.
   // 영상 자산은 슬롯 개념이 없으므로 건드리지 않는다.
-  const isImage = asset.assetType === 'FACE_IMAGE' || asset.assetType === 'BODY_IMAGE';
+  //
+  // 재검사(reclassify)면 이미 슬롯이 있어도 다시 분류한다 — 한 슬롯에 몰아서 올린 사진을
+  // 재검사 한 번으로 제자리에 보내기 위한 경로다. 단, 사람이 직접 지정한 슬롯은 그대로 둔다.
+  const manualSlot = (asset.qualityDetail as { manualSlot?: boolean } | null)?.manualSlot === true;
+  const shouldClassify = shouldClassifySlot(asset, data.reclassify === true);
+
   let prescanned: Awaited<ReturnType<typeof ml.embedFace | typeof ml.embedBody>> | null = null;
   let slotGuess: SlotGuess | null = null;
-  if (asset.assetType === 'UNSORTED' || (isImage && !asset.captureSlot)) {
+  if (shouldClassify) {
     const classified = await classifyAndAssignSlot(asset, data.traceId, log);
     if (!classified) {
       // 분류하지 못한 사진은 사람이 슬롯을 정해 줄 때까지 둔다 — 억지로 끼워 넣으면 프로파일이 오염된다
@@ -99,9 +104,14 @@ async function assetQuality(data: AssetQualityJob) {
       isUsable: verdict.usable,
       rejectReason: verdict.reason,
       // 자동 분류로 슬롯이 정해진 사진은 그 근거를 같이 남긴다 — 화면에서 확인 대상을 가려내야 한다.
-      qualityDetail: (slotGuess
-        ? { ...verdict.detail, autoSlot: true, classifierReason: slotGuess.reason, needsReview: slotGuess.needsReview }
-        : verdict.detail) as never,
+      // manualSlot은 판정이 바뀌어도 유지한다. 이게 지워지면 다음 재검사가 사람이 정한 슬롯을 덮어쓴다.
+      qualityDetail: {
+        ...verdict.detail,
+        ...(manualSlot ? { manualSlot: true } : {}),
+        ...(slotGuess
+          ? { autoSlot: true, classifierReason: slotGuess.reason, needsReview: slotGuess.needsReview }
+          : {}),
+      } as never,
       ...(face?.bbox ? { width: Math.round(face.bbox.w), height: Math.round(face.bbox.h) } : {}),
     },
   });
@@ -150,7 +160,7 @@ async function assetQuality(data: AssetQualityJob) {
  * 분류하지 못하면 슬롯을 비워 둔 채 사유만 남긴다. 반신 사진처럼 어느 쪽도 아닌 사진이 여기 온다.
  */
 async function classifyAndAssignSlot(
-  asset: { id: string; storageKey: string },
+  asset: { id: string; storageKey: string; captureSlot: string | null },
   traceId: string,
   log: ReturnType<typeof childLogger>,
 ): Promise<{
@@ -181,9 +191,13 @@ async function classifyAndAssignSlot(
   });
 
   if (!guess.slot || !guess.assetType) {
+    // 재분류였다면 원래 슬롯도 비운다 — 분류할 수 없는 사진을 엉뚱한 슬롯에 남겨 두면
+    // 그 슬롯이 충족된 것처럼 보이고 프로파일에 그대로 들어간다.
     await prisma.identityAsset.update({
       where: { id: asset.id },
       data: {
+        captureSlot: null,
+        assetType: 'UNSORTED',
         isUsable: false,
         rejectReason: 'UNCLASSIFIED',
         qualityDetail: { ...guess.detail, classifierReason: guess.reason } as never,
@@ -199,7 +213,7 @@ async function classifyAndAssignSlot(
     data: { captureSlot: guess.slot, assetType: guess.assetType },
   });
   log.info(
-    { assetId: asset.id, slot: guess.slot, needsReview: guess.needsReview },
+    { assetId: asset.id, from: asset.captureSlot, slot: guess.slot, needsReview: guess.needsReview },
     `슬롯을 자동 분류했다 — ${guess.reason}`,
   );
   // 얼굴 슬롯은 얼굴 측정을, 전신 슬롯은 전신 측정을 그대로 넘긴다.

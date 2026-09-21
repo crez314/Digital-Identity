@@ -39,6 +39,30 @@ export const SLOT_CLASSIFIER_POLICY = {
   reviewBandRatio: 0.25,
 } as const;
 
+/**
+ * 이 사진의 슬롯을 (다시) 분류해야 하는가.
+ *
+ * 세 경우에 분류한다.
+ *  · UNSORTED — 슬롯 없이 한꺼번에 올린 사진
+ *  · 이미지인데 슬롯이 비었다 — 이전 분류가 실패했거나 예전 데이터
+ *  · 재검사인데 사람이 정한 슬롯이 아니다 — 한 슬롯에 몰아 올린 사진을 제자리로 보낸다
+ *
+ * 사람이 직접 옮긴 슬롯(manualSlot)은 재검사에서도 건드리지 않는다. 자동 분류가 사람의
+ * 판단을 되돌리면 고쳐 놓을 방법이 없다 — 옮기면 다시 돌아오는 화면이 된다.
+ * 영상 자산은 슬롯 개념이 없어 대상이 아니다.
+ */
+export function shouldClassifySlot(
+  asset: { assetType: string; captureSlot: string | null; qualityDetail?: unknown },
+  reclassify = false,
+): boolean {
+  if (asset.assetType === 'UNSORTED') return true;
+  const isImage = asset.assetType === 'FACE_IMAGE' || asset.assetType === 'BODY_IMAGE';
+  if (!isImage) return false;
+  if (!asset.captureSlot) return true;
+  const manual = (asset.qualityDetail as { manualSlot?: boolean } | null)?.manualSlot === true;
+  return reclassify && !manual;
+}
+
 export interface SlotMeasurement {
   /** 얼굴을 찾았는가 */
   hasFace: boolean;

@@ -13,6 +13,11 @@ export const JobBase = z.object({
 export const AssetQualityJob = JobBase.extend({
   identityId: z.string().uuid(),
   assetId: z.string().uuid(),
+  /**
+   * 이미 슬롯이 정해진 사진도 다시 분류한다(재검사 경로).
+   * 사람이 직접 지정한 슬롯은 그대로 둔다 — 자동 분류가 사람의 판단을 되돌리면 고칠 방법이 없다.
+   */
+  reclassify: z.boolean().optional(),
 });
 
 export const ProfileBuildJob = JobBase.extend({

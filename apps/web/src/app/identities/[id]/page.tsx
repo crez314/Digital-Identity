@@ -261,7 +261,6 @@ export default function IdentityDetail() {
   const slotTile = (slot: string, required: boolean) => {
     const slotAssets = assetRows.filter((a) => a.captureSlot === slot && a.previewUrl);
     const filled = cov?.filledSlots.includes(slot) ?? false;
-    const busy = upload.isPending && upload.variables?.slot === slot;
     const dropping = dragOverSlot === slot;
     return (
       <div
@@ -351,25 +350,11 @@ export default function IdentityDetail() {
           )}
         </div>
 
-        <label
-          className={`mt-3 block rounded border border-neutral-300 px-3 py-1.5 text-center text-sm font-medium transition dark:border-neutral-700 ${
-            upload.isPending ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800'
-          }`}
-        >
-          {busy ? '업로드 중…' : '이미지 선택'}
-          <input
-            type="file"
-            accept={ACCEPT}
-            multiple
-            className="hidden"
-            disabled={upload.isPending}
-            onChange={(e) => {
-              const files = [...(e.target.files ?? [])];
-              e.target.value = ''; // 같은 파일을 다시 골라도 onChange가 오도록 비운다
-              if (files.length) upload.mutate({ slot, files });
-            }}
-          />
-        </label>
+        {/*
+          슬롯별 업로드 버튼은 두지 않는다. 그 버튼이 있으면 사진을 전부 한 슬롯(주로 정면)에
+          몰아 올리게 되고, 슬롯이 이미 박혀 있으니 자동 분류가 건너뛴다. 업로드는 위의
+          한꺼번에 올리기 한 곳에서만 하고, 이 타일은 분류 결과 확인과 수정(드래그) 용도다.
+        */}
       </div>
     );
   };
@@ -499,12 +484,14 @@ export default function IdentityDetail() {
                 onClick={() => recheck.mutate()}
                 disabled={recheck.isPending || building || assetRows.length === 0}
               >
-                {recheck.isPending ? '재검사 요청 중…' : '현재 기준으로 재검사'}
+                {recheck.isPending ? '재검사 요청 중…' : '다시 분류·검사'}
               </Button>
             </div>
           </div>
           <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-neutral-500">
-            <li>슬롯을 잘못 골랐다면 <strong>사진을 끌어다 다른 슬롯에 놓으면</strong> 옮겨집니다. 옮긴 뒤 자동으로 다시 판정합니다.</li>
+            <li>업로드는 위의 <strong>한꺼번에 올리기</strong>에서 합니다. 여기는 자동 분류 결과를 보고 고치는 곳입니다.</li>
+            <li><strong>다시 분류·검사</strong>를 누르면 이미 슬롯이 정해진 사진도 다시 재서 제자리로 옮깁니다. 직접 옮긴 사진은 그대로 둡니다.</li>
+            <li>분류가 틀렸다면 <strong>사진을 끌어다 다른 슬롯에 놓으면</strong> 옮겨집니다. 옮긴 뒤 자동으로 다시 판정합니다.</li>
             <li>얼굴 슬롯(정면·45°·90°): 얼굴 위주 사진 — 얼굴이 화면 세로의 15% 이상. 전신·반신 사진은 걸러집니다.</li>
             <li>전신 슬롯: 머리부터 발끝까지 나온 사진 — 전신 정면은 얼굴도 보여야 합니다.</li>
             <li>모두 같은 사람이어야 하며(섞이면 빌드가 CREZ-IDN-003으로 실패), 품질 0.4 이상만 사용됩니다. JPG·PNG·WEBP.</li>

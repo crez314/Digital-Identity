@@ -90,6 +90,15 @@ async function assetQuality(data: AssetQualityJob) {
 
   const usable = verdict.usable;
   if (usable) {
+    // 전신 사진에도 얼굴이 찍혀 있다. 그 얼굴 임베딩을 버리면 얼굴 centroid가 클로즈업 사진만으로
+    // 만들어지고, 인물이 멀리 잡히는 생성 영상과 기준의 성격이 어긋난다.
+    //
+    // 2026-09-21 실측(CRZ-A008, 같은 영상·같은 모델, centroid만 교체):
+    //   클로즈업 4장으로 만든 centroid  → 얼굴 유사도 0.707
+    //   전신 사진의 얼굴까지 포함(9장)  → 0.807
+    // 0.1 차이는 합격선을 넘기고 못 넘기고를 가른다. 자산 종류가 아니라 "얼굴이 잡혔는가"로 판단한다.
+    if (isBody) await embedFaceFromBodyImage(asset, data.traceId, quality, log);
+
     // 개별 이미지 임베딩을 모두 보존해야 재생성 시 "다른 레퍼런스 선택" 전략이 가능하다(§4.1).
     await insertEmbedding({
       id: randomUUID(),
@@ -109,6 +118,41 @@ async function assetQuality(data: AssetQualityJob) {
 }
 
 /**
+ * 전신 사진에서 얼굴 임베딩을 따로 뽑아 저장한다.
+ *
+ * 얼굴이 작거나 없으면 조용히 건너뛴다 — 이건 품질 판정이 아니라 기준 벡터를 두껍게 하려는 보강이고,
+ * 여기서 실패해도 전신 사진 자체의 사용 여부(§8.1 판정)는 이미 정해져 있다.
+ */
+async function embedFaceFromBodyImage(
+  asset: { id: string; identityId: string; storageKey: string },
+  traceId: string,
+  bodyQuality: number,
+  log: ReturnType<typeof childLogger>,
+): Promise<void> {
+  try {
+    const res = await ml.embedFace({ imageKeys: [asset.storageKey], traceId });
+    const r = res.results[0];
+    if (!r?.ok || !r.vector) return;
+
+    await insertEmbedding({
+      id: randomUUID(),
+      identityId: asset.identityId,
+      assetId: asset.id,
+      kind: 'FACE',
+      modelName: res.modelBundle.faceEmbedder,
+      modelVersion: res.modelBundle.runtime,
+      dim: r.dim ?? FACE_EMBEDDING_DIM,
+      vector: r.vector,
+      // 얼굴 품질로 가중한다 — 전신 사진의 신체 품질과는 다른 값이다
+      quality: r.quality ?? bodyQuality,
+    });
+    log.info({ assetId: asset.id, faceHeight: r.bbox?.h }, '전신 사진에서 얼굴 임베딩을 추가로 저장했다');
+  } catch (e) {
+    log.warn({ assetId: asset.id, err: String(e) }, '전신 사진의 얼굴 임베딩 추출 실패 — 건너뛴다');
+  }
+}
+
+/**
  * 프로파일 빌드 (§6.1, §21 Identity Profile Generator).
  * 개별 임베딩을 집계해 centroid/variance를 만들고, 사용한 모델 버전을 고정한다.
  */
@@ -125,8 +169,25 @@ async function profileBuild(data: ProfileBuildJob) {
     throw new CrezError(ErrorCode.IDN_SLOT_INCOMPLETE, undefined, { missingSlots: missing }, 422);
   }
 
-  const faceEmbeddings = await listEmbeddings(data.identityId, 'FACE');
+  const allFace = await listEmbeddings(data.identityId, 'FACE');
   const bodyEmbeddings = await listEmbeddings(data.identityId, 'BODY');
+
+  // 완전 측면(90°) 사진은 얼굴 centroid에서 뺀다.
+  // 얼굴 인식 모델은 정면 위주로 학습돼 있어 90° 측면은 같은 사람인데도 다른 사람처럼 나온다 —
+  // 2026-09-21 실측(CRZ-A008): 90° 사진이 본인의 다른 사진들과 0.169·0.182였고,
+  // 이는 타인 분포(평균 0.143)와 구분되지 않는 수준이다.
+  // 사진 자체는 보존한다 — 생성 레퍼런스로는 각도 다양성이 쓸모가 있기 때문이다(§11 REFERENCE_SWAP).
+  // 통계적 이상치 제거(MAD)가 지금까지 우연히 걸러 주고 있었지만, 표본이 바뀌면 통과할 수 있어 규칙으로 못 박는다.
+  const bySlot = new Map(assets.map((a) => [a.id, a.captureSlot]));
+  const faceEmbeddings = allFace.filter((e) => {
+    const slot = e.assetId ? bySlot.get(e.assetId) : null;
+    return slot !== 'LEFT_90' && slot !== 'RIGHT_90';
+  });
+  const excludedProfileViews = allFace.length - faceEmbeddings.length;
+  if (excludedProfileViews > 0) {
+    log.info({ excludedProfileViews }, '90° 측면 얼굴은 centroid에서 제외했다 — 정면 학습 모델이 타인처럼 본다');
+  }
+
   if (faceEmbeddings.length === 0) {
     await prisma.identityProfile.update({ where: { id: data.profileId }, data: { status: 'FAILED' } });
     throw new CrezError(ErrorCode.IDN_ASSET_QUALITY, '사용 가능한 얼굴 임베딩이 없습니다', null, 422);

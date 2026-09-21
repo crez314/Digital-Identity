@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
-  AssetUploadUrlRequest, ConfirmAssetRequest, CreateIdentityRequest, UpdateIdentityRequest,
+  AssetUploadUrlRequest, ConfirmAssetRequest, CreateIdentityRequest, UpdateIdentityRequest, MoveAssetSlotRequest,
 } from '@crez/contracts';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { CurrentUser, TraceId } from '../../common/auth/current-user.decorator';
@@ -85,6 +85,19 @@ export class IdentityController {
     @TraceId() traceId: string,
   ) {
     return this.svc.confirmAsset(user, id, body, traceId);
+  }
+
+  @Patch(':id/assets/:assetId')
+  @RequirePermission('IDENTITY_WRITE')
+  @ApiOperation({ summary: '사진을 다른 캡처 슬롯으로 옮긴다. 슬롯 기준이 다르므로 옮긴 뒤 다시 판정한다' })
+  moveAssetSlot(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Param('assetId') assetId: string,
+    @Body(new ZodValidationPipe(MoveAssetSlotRequest)) body: MoveAssetSlotRequest,
+    @TraceId() traceId: string,
+  ) {
+    return this.svc.moveAssetSlot(user, id, assetId, body.captureSlot, traceId);
   }
 
   @Post(':id/assets/recheck')

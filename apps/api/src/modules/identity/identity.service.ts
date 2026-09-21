@@ -348,6 +348,61 @@ export class IdentityService {
     return { queued: targets.length, skipped: assets.length - targets.length, traceId };
   }
 
+  /**
+   * §6.1 PATCH /identities/{id}/assets/{assetId} — 사진을 다른 캡처 슬롯으로 옮긴다.
+   *
+   * 올릴 때 슬롯을 잘못 고르는 일은 흔하다(측면 사진을 정면 칸에 올리는 식).
+   * 지우고 다시 올리게 하면 업로드를 반복해야 하므로 옮길 수 있게 한다.
+   *
+   * 슬롯마다 적합성 기준이 다르므로(§8.1) 옮긴 뒤 반드시 다시 판정한다 —
+   * 옮기기만 하면 "충족"으로 표시되는데 실제로는 엉뚱한 사진으로 프로파일이 빌드된다.
+   */
+  async moveAssetSlot(
+    user: AuthUser, identityId: string, assetId: string, captureSlot: string, traceId: string,
+  ) {
+    const identity = await this.prisma.identity.findFirst({ where: { id: identityId, orgId: user.orgId } });
+    if (!identity) throw new CrezError(ErrorCode.IDN_NOT_FOUND, undefined, { identityId }, 404);
+
+    const asset = await this.prisma.identityAsset.findFirst({ where: { id: assetId, identityId } });
+    if (!asset) throw new CrezError(ErrorCode.IDN_NOT_FOUND, '자산을 찾을 수 없음', { assetId }, 404);
+    if (!['FACE_IMAGE', 'BODY_IMAGE'].includes(asset.assetType)) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '이미지 자산만 슬롯을 옮길 수 있습니다', { assetId }, 422);
+    }
+    if (asset.checksum === 'pending') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '업로드가 끝나지 않은 사진은 옮길 수 없습니다', { assetId }, 409);
+    }
+
+    // 빌드는 그 시점의 사용 가능 자산을 읽는다. 중간에 슬롯이 바뀌면 결과가 섞인다.
+    const building = await this.prisma.identityProfile.count({ where: { identityId, status: 'BUILDING' } });
+    if (building > 0) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '프로파일 빌드 중에는 슬롯을 옮길 수 없습니다', null, 409);
+    }
+
+    if (asset.captureSlot === captureSlot) return { id: assetId, captureSlot, requeued: false };
+
+    // 얼굴 슬롯과 전신 슬롯은 자산 종류도 함께 바뀐다 — 판정이 보는 기준이 달라지기 때문이다
+    const assetType = captureSlot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE';
+
+    await this.prisma.identityAsset.update({
+      where: { id: assetId },
+      data: { captureSlot, assetType, ...PENDING_CHECK },
+    });
+    await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
+      traceId, orgId: user.orgId, identityId, assetId,
+    });
+
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'ASSET_RECHECKED', identityId,
+      payload: {
+        event: 'SLOT_MOVED', assetId,
+        before: { captureSlot: asset.captureSlot, assetType: asset.assetType },
+        after: { captureSlot, assetType },
+      },
+      traceId,
+    });
+    return { id: assetId, captureSlot, assetType, requeued: true };
+  }
+
   /** 프로파일 신규 버전 빌드 요청 → jobId 반환 (§6.1) */
   async buildProfile(user: AuthUser, identityId: string, traceId: string) {
     const identity = await this.prisma.identity.findFirst({

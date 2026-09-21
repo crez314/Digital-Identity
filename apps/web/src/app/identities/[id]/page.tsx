@@ -1,8 +1,10 @@
 'use client';
 
+import { useState } from 'react';
+
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
-import { del, get, post } from '@/lib/api';
+import { del, get, post, patch } from '@/lib/api';
 import { Badge, Button, Card, ErrorBox, Loading } from '@/components/ui';
 import { RightsCard } from '@/components/rights-card';
 import { uploadViaPresignedUrl } from '@/lib/upload';
@@ -172,6 +174,14 @@ export default function IdentityDetail() {
     onSuccess: refreshAssets,
   });
 
+  // 슬롯을 잘못 골라 올린 사진을 옮긴다. 슬롯마다 적합성 기준이 달라서(§8.1) 서버가 다시 판정한다.
+  const moveSlot = useMutation({
+    mutationFn: (v: { assetId: string; slot: string }) =>
+      patch<{ id: string; captureSlot: string }>(`/identities/${id}/assets/${v.assetId}`, { captureSlot: v.slot }),
+    onSuccess: refreshAssets,
+  });
+  const [dragOverSlot, setDragOverSlot] = useState<string | null>(null);
+
   // 기준이 바뀌었거나 ML 오류로 실패한 자산을 다시 올리지 않고 현재 기준으로 다시 판정한다.
   const recheck = useMutation({
     mutationFn: () => post<{ queued: number; skipped: number }>(`/identities/${id}/assets/recheck`),
@@ -233,11 +243,24 @@ export default function IdentityDetail() {
     const slotAssets = assetRows.filter((a) => a.captureSlot === slot && a.previewUrl);
     const filled = cov?.filledSlots.includes(slot) ?? false;
     const busy = upload.isPending && upload.variables?.slot === slot;
+    const dropping = dragOverSlot === slot;
     return (
       <div
         key={slot}
-        className={`rounded-lg border p-3 ${
-          filled ? 'border-green-700/60' : required ? 'border-amber-700/60' : 'border-neutral-200 dark:border-neutral-800'
+        // 사진을 끌어다 놓으면 그 슬롯으로 옮긴다 — 잘못 올렸을 때 지우고 다시 올릴 필요가 없다
+        onDragOver={(e) => { e.preventDefault(); setDragOverSlot(slot); }}
+        onDragLeave={() => setDragOverSlot((cur) => (cur === slot ? null : cur))}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOverSlot(null);
+          const assetId = e.dataTransfer.getData('text/asset-id');
+          const from = e.dataTransfer.getData('text/asset-slot');
+          if (assetId && from !== slot) moveSlot.mutate({ assetId, slot });
+        }}
+        className={`rounded-lg border p-3 transition ${
+          dropping
+            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30'
+            : filled ? 'border-green-700/60' : required ? 'border-amber-700/60' : 'border-neutral-200 dark:border-neutral-800'
         }`}
       >
         <div className="flex items-center justify-between gap-2">
@@ -261,8 +284,18 @@ export default function IdentityDetail() {
               return (
                 <div
                   key={a.id}
-                  className="relative w-16"
-                  title={st === 'EXCLUDED' ? exclusionReason(a).long : `${STATE_BADGE[st].label} · 품질 ${score(a.qualityScore)}`}
+                  draggable={!moveSlot.isPending}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('text/asset-id', a.id);
+                    e.dataTransfer.setData('text/asset-slot', slot);
+                    e.dataTransfer.effectAllowed = 'move';
+                  }}
+                  className={`relative w-16 ${moveSlot.isPending ? 'opacity-40' : 'cursor-grab active:cursor-grabbing'}`}
+                  title={
+                    st === 'EXCLUDED'
+                      ? exclusionReason(a).long
+                      : `${STATE_BADGE[st].label} · 품질 ${score(a.qualityScore)} — 끌어서 다른 슬롯으로 옮길 수 있습니다`
+                  }
                 >
                   {removable(a) ? (
                     <button
@@ -364,6 +397,7 @@ export default function IdentityDetail() {
             </div>
           </div>
           <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-neutral-500">
+            <li>슬롯을 잘못 골랐다면 <strong>사진을 끌어다 다른 슬롯에 놓으면</strong> 옮겨집니다. 옮긴 뒤 자동으로 다시 판정합니다.</li>
             <li>얼굴 슬롯(정면·45°·90°): 얼굴 위주 사진 — 얼굴이 화면 세로의 15% 이상. 전신·반신 사진은 걸러집니다.</li>
             <li>전신 슬롯: 머리부터 발끝까지 나온 사진 — 전신 정면은 얼굴도 보여야 합니다.</li>
             <li>모두 같은 사람이어야 하며(섞이면 빌드가 CREZ-IDN-003으로 실패), 품질 0.4 이상만 사용됩니다. JPG·PNG·WEBP.</li>

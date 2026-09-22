@@ -11,6 +11,7 @@
     "migrate": "prisma migrate dev",
     "deploy": "tsx prisma/deploy.ts",
     "seed": "tsx prisma/seed.ts",
+    "sync:models": "tsx prisma/sync-models.ts",
     "studio": "prisma studio"
   },
   "prisma": { "seed": "tsx prisma/seed.ts" },

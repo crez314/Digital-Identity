@@ -36,7 +36,7 @@ export const COST_CONFIRM_THRESHOLD = 10;
  * **실제 과금 길이는 구간 길이와 다르다** — 4초 구간은 5초로 올라가 25% 더 나간다.
  * 견적과 제출이 같은 값을 써야 상한이 제 역할을 한다.
  */
-export function snapDuration(options: number[] | null | undefined, seconds: number): number {
+export function snapDuration(options: readonly number[] | null | undefined, seconds: number): number {
   const usable = (options ?? []).filter((o) => Number.isFinite(o) && o > 0);
   if (usable.length === 0) return seconds;
   return usable.reduce((a, b) => (Math.abs(b - seconds) < Math.abs(a - seconds) ? b : a));

@@ -92,7 +92,10 @@ export function GenerationSettingsFields({
   const chosenWrongMode = chosen && !chosen.capabilities.modes.includes(value.requiredMode);
   const modeLabels = (m: ModelRow) => m.capabilities.modes.map((x) => MODE_INFO[x]?.label ?? x).join(' / ');
   const height = Number(value.resolution.replace('p', ''));
-  const seconds = chosen?.capabilities.durations?.join('·');
+  // 3~15초·4~30초처럼 범위로 받는 모델은 전부 나열하면 읽을 수 없다 — 연속이면 범위로 적는다
+  const durations = chosen?.capabilities.durations ?? [];
+  const contiguous = durations.length > 3 && durations.every((d, i) => i === 0 || d === durations[i - 1] + 1);
+  const seconds = contiguous ? `${durations[0]}~${durations[durations.length - 1]}` : durations.join('·');
 
   return (
     <div className="space-y-2">

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { encryptField } from '../src/crypto';
 import { setProfileCentroids } from '../src/vector';
+import { syncHiggsfieldModels } from './higgsfield-models';
 
 const prisma = new PrismaClient();
 
@@ -153,100 +154,9 @@ async function main() {
     });
   }
 
-  // ── Higgsfield 실제 모델 (공식 OpenAPI v2.0.0 기준) ────
-  // 능력값은 스펙에서 그대로 옮겼다. costPerSecond는 계약 단가가 확정되면 갱신해야 한다.
-  const higgsfield = [
-    {
-      code: 'higgsfield-veo31-reference',
-      provider: 'EXTERNAL_API',
-      endpoint: '/veo3.1/reference-to-video',
-      // 레퍼런스 이미지 1~3장으로 신원을 조건화한다 — CREZ Identity conditioning의 실제 경로
-      capabilities: { maxDurationMs: 8000, maxPersons: 3, modes: ['reference'], maxResolution: 1080, billable: true,
-                      durations: [4, 6, 8], endpoint: '/veo3.1/reference-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.4,
-    },
-    {
-      code: 'higgsfield-veo31-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/veo3.1/image-to-video',
-      capabilities: { maxDurationMs: 8000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [4, 6, 8], endpoint: '/veo3.1/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.3,
-    },
-    {
-      code: 'higgsfield-kling25-pro-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.25,
-    },
-    {
-      code: 'higgsfield-sora2-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/sora-2/image-to-video',
-      capabilities: { maxDurationMs: 12000, maxPersons: 1, modes: ['i2v'], maxResolution: 720, billable: true,
-                      durations: [4, 8, 12], endpoint: '/sora-2/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.35,
-    },
-    // 2026-09-16 계정 점검에서 실제로 호출된 kling 변형들 (모델 확인 단계를 통과해 값 검증까지 도달).
-    // i2v는 시작 이미지 1장이라 인물 1명만 가능하고 다중 인물 신원 조건화는 되지 않는다.
-    {
-      code: 'higgsfield-kling25-standard-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.5-turbo/standard/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/standard/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.18,
-    },
-    {
-      code: 'higgsfield-kling21-pro-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.1/pro/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [5, 10], endpoint: '/kling-video/v2.1/pro/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.2,
-    },
-    {
-      code: 'higgsfield-kling21-standard-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.1/standard/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [5, 10], endpoint: '/kling-video/v2.1/standard/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.12,
-    },
-    {
-      code: 'higgsfield-kling21-master-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.1/master/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080, billable: true,
-                      durations: [5, 10], endpoint: '/kling-video/v2.1/master/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.3,
-    },
-  ];
-  // 계정에서 실제로 호출되는 모델만 ACTIVE로 둔다 (2026-09-16 확인).
-  // veo3.1·sora2 계열은 model_not_found·model_disabled라, 지정하면 생성이 매번 실패한다.
-  // 접근이 열리면 여기에 code를 넣거나 PATCH /models/{code}/status 로 켠다.
-  const HF_ACTIVE = new Set([
-    'higgsfield-kling25-pro-i2v', 'higgsfield-kling25-standard-i2v',
-    'higgsfield-kling21-pro-i2v', 'higgsfield-kling21-standard-i2v', 'higgsfield-kling21-master-i2v',
-  ]);
-  for (const m of higgsfield) {
-    const status = HF_ACTIVE.has(m.code) ? 'ACTIVE' : 'DISABLED';
-    await prisma.aiModel.upsert({
-      where: { code: m.code },
-      update: { capabilities: m.capabilities as never, endpoint: m.endpoint, costPerSecond: m.costPerSecond, status },
-      create: { ...m, capabilities: m.capabilities as never, status, metrics: {} } as never,
-    });
-  }
+  // ── Higgsfield 실제 모델 — 목록·상태·단가는 higgsfield-models.ts 한 곳에 둔다 ────
+  // 모델만 바꿀 때는 전체 시드 대신 `pnpm --filter @crez/db sync:models`를 쓴다.
+  await syncHiggsfieldModels(prisma);
 
   // ── §10 QC ruleset v1 — 초기 가중치는 기획 초안 제안값 ──
   // v2가 활성이므로 v1은 비활성으로 남긴다(이력 재현용).

@@ -1,5 +1,6 @@
 import {
-  CrezError, ErrorCode, logger, IDENTITY_NEGATIVE_PROMPT, promptAdherenceFromConditioning, snapDuration,
+  CrezError, ErrorCode, HIGGSFIELD_DURATIONS, logger, IDENTITY_NEGATIVE_PROMPT, promptAdherenceFromConditioning,
+  snapDuration,
   type ErrorCodeValue,
 } from '@crez/shared';
 import type {
@@ -10,8 +11,9 @@ import { planImages } from '../image-plan';
 /**
  * Higgsfield 생성 API 어댑터.
  *
- * 계약 출처는 공식 OpenAPI 스펙(https://docs.higgsfield.ai/docs/openapi.json, v2.0.0)이며,
- * 이 파일의 필드명·enum·경로는 전부 그 스펙에서 그대로 가져왔다. 추정한 값은 없다.
+ * 계약 출처: 공통 흐름(인증·제출·폴링·취소)은 공식 OpenAPI 스펙(https://docs.higgsfield.ai/docs/openapi.json,
+ * v2.0.0)이다. 다만 그 스펙에는 영상 모델이 5개뿐이라, 모델별 요청 필드는 카탈로그의 모드별 input_schema
+ * (https://open.higgsfield.ai/models/<경로>/api-reference)에서 가져왔다 — ENDPOINT_SPECS 참고.
  *
  *   인증   Authorization: Key {API_KEY_ID}:{API_KEY_SECRET}   (Bearer 아님)
  *   제출   POST {endpoint}                    → { status, request_id, status_url, cancel_url, video? }
@@ -21,8 +23,9 @@ import { planImages } from '../image-plan';
  *
  * CREZ 관점에서 중요한 두 가지:
  *
- * 1. `/veo3.1/reference-to-video`가 레퍼런스 이미지 1~3장을 받는다. 이것이 Identity
- *    conditioning에 대응하는 유일한 상용 경로이므로 기본 경로로 삼는다.
+ * 1. 레퍼런스 경로(image_urls)가 Identity conditioning에 대응한다. veo3.1은 계정에서 막혔고,
+ *    2026-09-22 기준 열린 경로는 seedance 2.5/2.0 reference-to-video, minimax h3 reference-to-video,
+ *    kling o3/omni image-reference다.
  * 2. 상태 enum에 `nsfw`가 따로 있다. 콘텐츠 정책 거부는 재시도 대상이 아니므로(§8)
  *    CREZ-GEN-003으로 매핑해 재시도 루프에 들어가지 않게 한다.
  */
@@ -74,29 +77,138 @@ export function classifyHiggsfieldError(detail: string): ErrorCodeValue {
   return ErrorCode.GEN_PROVIDER_ERROR;
 }
 
-/** 스펙상 duration은 임의 값이 아니라 고정 enum이다. 경로별 허용 목록. */
-const DURATION_OPTIONS: Record<string, number[]> = {
-  'veo3.1': [4, 6, 8],
-  kling: [5, 10],
-  'sora-2': [4, 8, 12],
-  minimax: [6, 10],
-  'wan-25': [5, 10],
-  seedance: [4, 8, 12],
+/**
+ * 경로별 요청 규격.
+ *
+ * 모델마다 필드 이름과 표기가 다르다 — 시작 이미지 1장(image_url)인지 레퍼런스 여러 장(image_urls)인지,
+ * 길이가 정수인지 문자열인지, 해상도가 '720'·'720p'·'2K' 중 무엇인지, 오디오를 끄는 필드가
+ * generate_audio인지 sound인지. 경로 앞부분으로 짐작하면 새 모델이 옛 모델 형식으로 나가 400으로 실패한다.
+ * 그래서 경로마다 명시하고, 표에 없는 경로는 제출하지 않는다.
+ *
+ * 출처: 각 모드의 input_schema — https://open.higgsfield.ai/models/<경로>/api-reference (2026-09-22 조회).
+ * 스키마에 없는 필드는 보내지 않는다.
+ */
+export interface EndpointSpec {
+  /** image_url: 시작 이미지 1장. image_urls: 인물 레퍼런스 여러 장(max까지) */
+  images: { field: 'image_url' } | { field: 'image_urls'; max: number };
+  durationType: 'integer' | 'string';
+  /** [세로 픽셀, 스펙 표기] 오름차순. 요청 높이 이상인 가장 작은 값을 쓴다. 없으면 해상도를 보내지 않는다 */
+  resolutions?: ReadonlyArray<readonly [number, string]>;
+  /** 스펙이 받는 화면 비율. 없으면 보내지 않는다 — 출력이 시작 이미지 비율을 따른다 */
+  aspectRatios?: readonly string[];
+  /** 스펙의 cfg_scale("프롬프트 준수 강도")로 신원 조건화를 뒤집어 넘긴다 */
+  cfgScale?: boolean;
+  /** 스펙에 negative_prompt가 있다 — 인물 교체·컷 전환을 한 번 더 막는다 */
+  negativePrompt?: boolean;
+  /** 고정 필드. 오디오는 별도 파이프라인이라 생성 단계에서 끈다 */
+  fixed?: Readonly<Record<string, unknown>>;
+}
+
+const VEO_RES = [[720, '720'], [1080, '1080']] as const;
+const P_RES = [[720, '720p'], [1080, '1080p']] as const;
+const SEEDANCE_25_RES = [[480, '480p'], [720, '720p']] as const;
+const SEEDANCE_20_RES = [[480, '480p'], [720, '720p'], [1080, '1080p'], [2160, '4k']] as const;
+const WIDE_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'] as const;
+const KLING_RATIOS = ['16:9', '9:16', '1:1'] as const;
+const H3_RATIOS = ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16'] as const;
+
+const KLING_LEGACY: EndpointSpec = {
+  images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, negativePrompt: true,
+};
+const KLING_V3: EndpointSpec = {
+  images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, fixed: { sound: 'off' },
 };
 
-/** 해상도도 경로별로 표기가 다르다('720' vs '720p'). 스펙 표기를 그대로 쓴다. */
-function resolutionValue(endpoint: string, height: number): string {
-  const target = height >= 1080 ? 1080 : 720;
-  if (endpoint.startsWith('/veo3.1')) return String(target);            // '720' | '1080'
-  if (endpoint.startsWith('/sora-2')) return `${target}p`;              // '720p' | '1080p'
-  if (endpoint.startsWith('/wan-25')) return `${target}p`;
-  if (endpoint.startsWith('/bytedance')) return String(target);         // '480' | '720' | '1080'
-  return `${target}p`;
+export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
+  // reference-to-video — Identity conditioning 경로. veo3.1은 스펙 maxItems=3
+  '/veo3.1/reference-to-video': {
+    images: { field: 'image_urls', max: 3 }, durationType: 'string', resolutions: VEO_RES,
+    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+  },
+  '/veo3.1/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'string', resolutions: VEO_RES,
+    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+  },
+  '/veo3.1/fast/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'string', resolutions: VEO_RES,
+    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+  },
+  '/sora-2/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: P_RES },
+
+  '/kling-video/v2.1/standard/image-to-video': KLING_LEGACY,
+  '/kling-video/v2.1/pro/image-to-video': KLING_LEGACY,
+  '/kling-video/v2.1/master/image-to-video': KLING_LEGACY,
+  '/kling-video/v2.5-turbo/pro/image-to-video': KLING_LEGACY,
+  '/kling-video/v2.5-turbo/standard/image-to-video': KLING_LEGACY,
+  '/kling-video/v2.6/pro/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, aspectRatios: KLING_RATIOS,
+    fixed: { sound: 'off' },
+  },
+  '/kling-video/v3.0/std/image-to-video': KLING_V3,
+  '/kling-video/v3.0/pro/image-to-video': KLING_V3,
+  '/kling-video/v3.0/4k/image-to-video': KLING_V3,
+  '/kling-video/v3.0-turbo/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: P_RES },
+  // 레퍼런스 장수 상한이 스키마에 없다 — 모르는 상한을 넘겨 400을 받지 않도록 보수적으로 4장
+  '/kling-video/o3/image-reference': {
+    images: { field: 'image_urls', max: 4 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
+    fixed: { sound: 'off' },
+  },
+  '/kling-video/omni/image-reference': {
+    images: { field: 'image_urls', max: 4 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
+  },
+
+  '/bytedance/seedance-2.5/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
+    fixed: { generate_audio: false },
+  },
+  '/bytedance/seedance-2.5/reference-to-video': {
+    images: { field: 'image_urls', max: 30 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
+    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+  },
+  '/bytedance/seedance-2.0/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
+    fixed: { generate_audio: false },
+  },
+  '/bytedance/seedance-2.0/reference-to-video': {
+    images: { field: 'image_urls', max: 9 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
+    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+  },
+
+  // H3는 해상도가 '2K' 하나뿐이다
+  '/minimax/h3/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: [[1440, '2K']] },
+  '/minimax/h3/reference-to-video': {
+    images: { field: 'image_urls', max: 9 }, durationType: 'integer', resolutions: [[1440, '2K']],
+    aspectRatios: H3_RATIOS,
+  },
+  // prompt_optimizer는 제공자가 프롬프트를 고쳐 쓴다 — CREZ가 넣은 신원 고정 문구가 사라질 수 있어 끈다
+  '/minimax/hailuo-2.3/standard/image-to-video': {
+    images: { field: 'image_url' }, durationType: 'integer', fixed: { prompt_optimizer: false },
+  },
+};
+
+function specFor(endpoint: string): EndpointSpec {
+  const spec = ENDPOINT_SPECS[endpoint];
+  if (!spec) {
+    throw new CrezError(
+      ErrorCode.GEN_NO_CAPABLE_MODEL,
+      `higgsfield: 요청 규격을 모르는 경로 ${endpoint} — adapters/higgsfield.ts의 ENDPOINT_SPECS에 추가해야 한다`,
+      { endpoint }, 422,
+    );
+  }
+  return spec;
+}
+
+function resolutionValue(spec: EndpointSpec, height: number): string | null {
+  const options = spec.resolutions;
+  if (!options?.length) return null;
+  return (options.find(([h]) => h >= height) ?? options[options.length - 1])[1];
 }
 
 function durationFor(endpoint: string, durationMs: number): { value: number; snapped: boolean } {
-  const family = Object.keys(DURATION_OPTIONS).find((k) => endpoint.includes(k)) ?? 'veo3.1';
-  const options = DURATION_OPTIONS[family];
+  const options = HIGGSFIELD_DURATIONS[endpoint];
+  if (!options) {
+    throw new CrezError(ErrorCode.GEN_NO_CAPABLE_MODEL, `higgsfield: 허용 길이를 모르는 경로 ${endpoint}`, { endpoint }, 422);
+  }
   const wanted = durationMs / 1000;
   // 세그먼트 길이는 임의값이지만 제공자는 고정 길이만 받는다. 가장 가까운 값으로 맞추고
   // 그 사실을 호출자에게 알린다 — 조용히 길이가 바뀌면 QC 시계열이 소스와 어긋난다.
@@ -165,11 +277,12 @@ export class HiggsfieldProvider implements GenerationProvider {
   }
 
   /**
-   * 제출할 이미지 배분. reference-to-video는 스펙상 image_urls 최대 3장, image-to-video는 시작 이미지 1장이다.
+   * 제출할 이미지 배분. 레퍼런스 경로는 스펙의 image_urls 상한까지, image-to-video는 시작 이미지 1장이다.
    * 인물 얼굴을 먼저 한 장씩 넣고 남는 자리에 배경·의상·헤어 참고 이미지를 넣는다(image-plan.ts).
    */
   planImages(req: GenerationRequest): ImagePlan {
-    return planImages(req, this.cfg.endpoint.includes('reference-to-video') ? 3 : 1);
+    const { images } = specFor(this.cfg.endpoint);
+    return planImages(req, images.field === 'image_urls' ? images.max : 1);
   }
 
   /** 신원 레퍼런스 없이 참고 이미지만으로 제출하면 인물이 보장되지 않으므로 거절한다 */
@@ -183,6 +296,7 @@ export class HiggsfieldProvider implements GenerationProvider {
 
   private buildBody(req: GenerationRequest): Record<string, unknown> {
     const ep = this.cfg.endpoint;
+    const spec = specFor(ep);
     const { value: duration, snapped } = durationFor(ep, req.durationMs);
     if (snapped) {
       logger.warn(
@@ -190,48 +304,38 @@ export class HiggsfieldProvider implements GenerationProvider {
         'higgsfield: 세그먼트 길이를 제공자 허용 길이로 스냅했다',
       );
     }
-    const aspect = req.aspectRatio;
-    const prompt = req.prompt ?? '';
 
-    // reference-to-video — Identity conditioning 경로
-    if (ep.includes('reference-to-video')) {
-      const urls = this.plannedUrls(req, 'reference-to-video에는 인물 레퍼런스 이미지가 최소 1장 필요하다'); // 스펙 maxItems=3
-      return {
-        prompt,
-        image_urls: urls,
-        duration: String(duration),                      // veo3.1은 문자열 enum
-        resolution: resolutionValue(ep, req.resolution),
-        aspect_ratio: aspect,
-        generate_audio: false,                            // 오디오는 별도 파이프라인
-      };
+    const body: Record<string, unknown> = { prompt: req.prompt ?? '' };
+    if (spec.images.field === 'image_urls') {
+      // 레퍼런스 경로 — Identity conditioning
+      body.image_urls = this.plannedUrls(req, '레퍼런스 경로에는 인물 레퍼런스 이미지가 최소 1장 필요하다');
+    } else {
+      // image-to-video — 시작 프레임 1장. 참고 이미지를 받을 자리가 없어 전부 dropped로 기록된다
+      body.image_url = this.plannedUrls(req, 'image-to-video에는 인물 시작 이미지가 필요하다')[0];
+    }
+    body.duration = spec.durationType === 'string' ? String(duration) : duration;
+
+    const resolution = resolutionValue(spec, req.resolution);
+    if (resolution !== null) body.resolution = resolution;
+
+    if (spec.aspectRatios?.includes(req.aspectRatio)) {
+      body.aspect_ratio = req.aspectRatio;
+    } else {
+      // 비율 파라미터가 없거나 이 비율을 받지 않는 모델 — 출력이 시작 이미지(또는 제공자 기본) 비율을 따른다.
+      // 얼굴 위주 레퍼런스를 쓰면 정사각형에 가까운 영상이 나오므로 조용히 넘기지 않는다.
+      logger.warn(
+        { segmentId: req.segmentId, endpoint: ep, requested: req.aspectRatio, supported: spec.aspectRatios ?? null },
+        'higgsfield: 이 모델은 요청한 화면 비율을 지정할 수 없다 — 시작 이미지 비율을 따른다',
+      );
     }
 
-    // image-to-video — 시작 프레임 1장. 참고 이미지를 받을 자리가 없어 전부 dropped로 기록된다
-    const [first] = this.plannedUrls(req, 'image-to-video에는 인물 시작 이미지가 필요하다');
-    const body: Record<string, unknown> = { prompt, image_url: first };
-    if (ep.startsWith('/veo3.1')) {
-      body.duration = String(duration);
-      body.resolution = resolutionValue(ep, req.resolution);
-      body.aspect_ratio = aspect;
-      body.generate_audio = false;
-    } else if (ep.includes('kling')) {
-      body.duration = duration;                           // kling은 정수
+    if (spec.cfgScale) {
       // 스펙상 cfg_scale은 "프롬프트 준수 강도"(0~1, 기본 0.5)다. 값이 높을수록 텍스트를 따라가며
       // 시작 이미지에서 멀어지므로, 신원 조건화 강도를 뒤집어 넘긴다 (prompt-identity.ts).
       body.cfg_scale = promptAdherenceFromConditioning(req.conditioningStrength);
-      // 스펙에 negative_prompt가 있다. 인물 교체·컷 전환을 여기서 한 번 더 막는다.
-      body.negative_prompt = IDENTITY_NEGATIVE_PROMPT;
-      // kling 스펙에는 화면 비율 파라미터가 없다 — 출력이 시작 이미지 비율을 그대로 따른다.
-      // 얼굴 위주 레퍼런스를 쓰면 정사각형에 가까운 영상이 나오므로 조용히 넘기지 않는다.
-      logger.warn(
-        { segmentId: req.segmentId, endpoint: ep, requested: req.aspectRatio },
-        'higgsfield: 이 모델은 화면 비율을 지정할 수 없다 — 시작 이미지 비율을 따른다',
-      );
-    } else {
-      body.duration = duration;
-      body.resolution = resolutionValue(ep, req.resolution);
     }
-    return body;
+    if (spec.negativePrompt) body.negative_prompt = IDENTITY_NEGATIVE_PROMPT;
+    return { ...body, ...spec.fixed };
   }
 
   async submit(req: GenerationRequest, _model?: ModelDescriptor): Promise<SubmitResult> {

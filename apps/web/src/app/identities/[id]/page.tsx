@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
@@ -198,6 +198,14 @@ export default function IdentityDetail() {
   });
   const [dragOverSlot, setDragOverSlot] = useState<string | null>(null);
   const [bulkDragging, setBulkDragging] = useState(false);
+  // 끌고 있는 사진. dataTransfer의 사용자 정의 타입은 브라우저마다 drop에서 읽히는 조건이 달라서
+  // 같은 페이지 안의 이동은 여기서 읽는다. from이 null이면 미분류 사진이다.
+  const dragging = useRef<{ assetId: string; from: string | null } | null>(null);
+  const startDrag = (e: React.DragEvent, assetId: string, from: string | null) => {
+    dragging.current = { assetId, from };
+    e.dataTransfer.setData('text/asset-id', assetId);
+    e.dataTransfer.effectAllowed = 'move';
+  };
 
   // 기준이 바뀌었거나 ML 오류로 실패한 자산을 다시 올리지 않고 현재 기준으로 다시 판정한다.
   const recheck = useMutation({
@@ -261,6 +269,9 @@ export default function IdentityDetail() {
   // 자동 분류가 경계에 걸려 사람이 한 번 봐야 하는 사진
   const needsReview = assetRows.filter((a) => a.captureSlot !== null && a.qualityDetail?.needsReview === true);
 
+  // 빌드 중에는 서버가 슬롯 이동을 거절한다(빌드가 읽는 자산이 바뀌면 결과가 섞인다) — 미리 막는다
+  const canDrag = !moveSlot.isPending && !building;
+
   const slotTile = (slot: string, required: boolean) => {
     const slotAssets = assetRows.filter((a) => a.captureSlot === slot && a.previewUrl);
     const filled = cov?.filledSlots.includes(slot) ?? false;
@@ -269,14 +280,29 @@ export default function IdentityDetail() {
       <div
         key={slot}
         // 사진을 끌어다 놓으면 그 슬롯으로 옮긴다 — 잘못 올렸을 때 지우고 다시 올릴 필요가 없다
-        onDragOver={(e) => { e.preventDefault(); setDragOverSlot(slot); }}
-        onDragLeave={() => setDragOverSlot((cur) => (cur === slot ? null : cur))}
+        onDragOver={(e) => {
+          // 탐색기에서 끌어온 파일은 받지 않는다(업로드는 위의 한꺼번에 올리기 한 곳) — 놓을 수 없다고 표시한다.
+          // 그냥 두면 브라우저가 파일을 열며 페이지를 떠나므로 dragover는 가로챈다.
+          if (!dragging.current) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'none';
+            return;
+          }
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          setDragOverSlot(slot);
+        }}
+        onDragLeave={(e) => {
+          // 타일 안의 썸네일로 들어갈 때도 dragleave가 온다 — 타일 밖으로 나갈 때만 강조를 끈다
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragOverSlot((cur) => (cur === slot ? null : cur));
+        }}
         onDrop={(e) => {
           e.preventDefault();
           setDragOverSlot(null);
-          const assetId = e.dataTransfer.getData('text/asset-id');
-          const from = e.dataTransfer.getData('text/asset-slot');
-          if (assetId && from !== slot) moveSlot.mutate({ assetId, slot });
+          const item = dragging.current;
+          dragging.current = null;
+          if (item && item.from !== slot) moveSlot.mutate({ assetId: item.assetId, slot });
         }}
         className={`rounded-lg border p-3 transition ${
           dropping
@@ -305,15 +331,14 @@ export default function IdentityDetail() {
               return (
                 <div
                   key={a.id}
-                  draggable={!moveSlot.isPending}
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData('text/asset-id', a.id);
-                    e.dataTransfer.setData('text/asset-slot', slot);
-                    e.dataTransfer.effectAllowed = 'move';
-                  }}
-                  className={`relative w-16 ${moveSlot.isPending ? 'opacity-40' : 'cursor-grab active:cursor-grabbing'}`}
+                  draggable={canDrag}
+                  onDragStart={(e) => startDrag(e, a.id, slot)}
+                  onDragEnd={() => { dragging.current = null; setDragOverSlot(null); }}
+                  className={`relative w-16 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'}`}
                   title={
-                    st === 'EXCLUDED'
+                    building
+                      ? '프로파일 빌드 중에는 슬롯을 옮길 수 없습니다'
+                      : st === 'EXCLUDED'
                       ? exclusionReason(a).long
                       : a.qualityDetail?.needsReview === true
                       ? `자동 분류가 경계에 걸렸습니다 — ${String(a.qualityDetail.classifierReason ?? '')} 틀렸으면 끌어다 옮기세요.`
@@ -336,6 +361,8 @@ export default function IdentityDetail() {
                   <img
                     src={a.previewUrl ?? ''}
                     alt={`${slot} 자산`}
+                    // 이미지 자체의 기본 드래그(주소 끌기) 대신 감싼 div의 드래그가 시작되게 한다
+                    draggable={false}
                     className={`h-16 w-16 rounded object-cover ${st === 'EXCLUDED' ? 'opacity-30 grayscale' : ''} ${
                       a.qualityDetail?.needsReview === true ? 'ring-2 ring-amber-500' : ''
                     }`}
@@ -397,12 +424,17 @@ export default function IdentityDetail() {
           많이 올릴수록 기준 벡터가 두꺼워져 일치율이 올라갑니다. 판단이 어려운 사진만 아래에 모아 두니 직접 지정하세요.
         </p>
         <label
-          onDragOver={(e) => { e.preventDefault(); setBulkDragging(true); }}
+          onDragOver={(e) => {
+            // 슬롯 간 이동 드래그는 여기서 받지 않는다 — 놓을 곳처럼 강조하지 않는다
+            if (dragging.current) return;
+            e.preventDefault();
+            setBulkDragging(true);
+          }}
           onDragLeave={() => setBulkDragging(false)}
           onDrop={(e) => {
             e.preventDefault();
             setBulkDragging(false);
-            // 슬롯 간 이동 드래그(text/asset-id)는 여기서 받지 않는다 — 파일만 처리한다
+            // 파일만 처리한다
             const files = [...e.dataTransfer.files].filter((f) => ACCEPT.includes(f.type));
             if (files.length && !upload.isPending) upload.mutate({ files });
           }}
@@ -438,12 +470,16 @@ export default function IdentityDetail() {
             <div className="mt-2 flex flex-wrap gap-3">
               {unsorted.map((a) => (
                 <div key={a.id} className="w-28">
+                  {/* 아래 슬롯 타일로 끌어다 놓아도 지정된다 */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={a.previewUrl ?? ''}
                     alt="분류되지 않은 사진"
-                    className="h-28 w-28 rounded object-cover"
-                    title={exclusionReason(a).long}
+                    draggable={canDrag}
+                    onDragStart={(e) => startDrag(e, a.id, null)}
+                    onDragEnd={() => { dragging.current = null; setDragOverSlot(null); }}
+                    className={`h-28 w-28 rounded object-cover ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'}`}
+                    title={`${exclusionReason(a).long} 아래 슬롯으로 끌어다 놓아도 됩니다.`}
                   />
                   <div className="mt-1 line-clamp-2 text-[10px] text-neutral-500" title={exclusionReason(a).long}>
                     {a.qualityDetail?.classifierReason ? String(a.qualityDetail.classifierReason) : '분류 중…'}
@@ -499,6 +535,8 @@ export default function IdentityDetail() {
             <li>전신 슬롯: 머리부터 발끝까지 나온 사진 — 전신 정면은 얼굴도 보여야 합니다.</li>
             <li>모두 같은 사람이어야 하며(섞이면 빌드가 CREZ-IDN-003으로 실패), 품질 0.4 이상만 사용됩니다. JPG·PNG·WEBP.</li>
           </ul>
+          {/* 슬롯 이동 실패는 드래그한 자리 가까이에 보여 준다 — 맨 위 오류 칸은 타일에서 보이지 않는다 */}
+          {moveSlot.error ? <div className="mt-3"><ErrorBox error={moveSlot.error} /></div> : null}
           {recheck.data ? (
             <p className="mt-2 text-xs text-neutral-500">
               {recheck.data.queued}장을 다시 검사합니다{recheck.data.skipped ? ` · 직접 삭제한 ${recheck.data.skipped}장은 제외` : ''}.

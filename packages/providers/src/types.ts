@@ -140,6 +140,14 @@ export interface FetchResult {
 }
 
 export interface GenerationProvider {
+  /**
+   * 제공자 스토리지에 입력 파일을 올리고 제공자가 읽을 수 있는 주소를 돌려준다.
+   *
+   * 이 기능이 있으면 우리 스토리지를 인터넷에 공개할 필요가 없다 — 공개 주소(터널)는 끊기면
+   * 생성이 통째로 실패하는 단일 장애점이었다. 지원하지 않는 제공자는 이 메서드를 두지 않는다.
+   */
+  uploadAsset?(body: Uint8Array, contentType: string): Promise<string>;
+
   readonly code: string;
   /** 이 제공자에 넘길 이미지와 빠지는 첨부를 계산한다. submit이 쓰는 것과 같은 결과여야 한다 */
   planImages(req: GenerationRequest): ImagePlan;

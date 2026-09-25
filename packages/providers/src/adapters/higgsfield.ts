@@ -361,6 +361,38 @@ export class HiggsfieldProvider implements GenerationProvider {
     return { ...body, ...spec.fixed };
   }
 
+  /**
+   * 입력 파일을 Higgsfield 스토리지에 올린다 (docs: concepts/file-uploads).
+   *   1. POST /files/generate-upload-url  → { public_url, upload_url, upload_headers }
+   *   2. PUT upload_url (제공자가 준 헤더 그대로, 자격증명은 붙이지 않는다)
+   *   3. public_url을 image_url/image_urls에 쓴다
+   * 업로드 주소는 1시간 뒤 만료되고, content_type은 1단계와 2단계가 같아야 한다.
+   */
+  async uploadAsset(body: Uint8Array, contentType: string): Promise<string> {
+    const ticket = await this.call<{ public_url: string; upload_url: string; upload_headers?: Record<string, string> }>(
+      '/files/generate-upload-url',
+      { method: 'POST', body: JSON.stringify({ content_type: contentType }) },
+    );
+    if (!ticket.public_url || !ticket.upload_url) {
+      throw new CrezError(ErrorCode.GEN_PROVIDER_ERROR, 'higgsfield 업로드 주소 발급 응답이 비었다', ticket, 502);
+    }
+    // 제공자가 준 presigned 주소다 — 우리 API 키를 붙이면 서명이 깨진다(docs 경고).
+    const res = await fetch(ticket.upload_url, {
+      method: 'PUT',
+      headers: ticket.upload_headers ?? { 'content-type': contentType },
+      body,
+    });
+    if (!res.ok) {
+      throw new CrezError(
+        ErrorCode.GEN_PROVIDER_ERROR,
+        `higgsfield 업로드 실패 ${res.status}`,
+        { status: res.status, sent: true, accepted: false },
+        502,
+      );
+    }
+    return ticket.public_url;
+  }
+
   async submit(req: GenerationRequest, _model?: ModelDescriptor): Promise<SubmitResult> {
     const body = this.buildBody(req);
     const res = await this.call<HfRequest>(this.cfg.endpoint, {

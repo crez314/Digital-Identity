@@ -21,6 +21,7 @@ import { finalizeGeneration } from '../lib/generation-finalize';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
 import { presignReference } from '../lib/reference-image';
+import { hostReferencesOnProvider } from '../lib/provider-assets';
 import { assertReferenceOriginsReachable } from '../lib/reference-origin';
 import {
   buildChainStartFrame, CHAIN_ASSET_PREFIX, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
@@ -397,6 +398,14 @@ async function submit(data: GenerationJobPayload) {
   };
 
   const provider = providerRegistry.resolve(decision.model);
+
+  // 제공자가 입력 파일을 직접 받으면 우리 스토리지를 인터넷에 공개할 필요가 없다.
+  // 공개 주소(임시 터널)는 끊기는 순간 생성이 통째로 실패하는 단일 장애점이었다.
+  const hosted = await hostReferencesOnProvider(request, provider);
+  if (hosted.uploaded > 0) {
+    log.info({ ...hosted, model: decision.model.code }, '레퍼런스를 제공자 스토리지에 올렸다 — 공개 주소가 필요 없다');
+  }
+
   // 제공자마다 받을 수 있는 이미지 수가 다르다. 실제로 넘긴 이미지와 빠진 첨부를 기록한다(URL은 만료되므로 제외).
   const imagePlan = provider.planImages(request);
 

@@ -43,6 +43,13 @@ export async function objectExists(key: string): Promise<boolean> {
   }
 }
 
+/** 객체를 메모리로 읽는다 — 제공자 스토리지로 바로 올릴 때 쓴다(디스크를 거치지 않는다) */
+export async function readObject(key: string): Promise<Uint8Array> {
+  const res = await client.send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
+  if (!res.Body) throw new Error(`empty object: ${key}`);
+  return new Uint8Array(await (res.Body as Readable & { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray());
+}
+
 export async function downloadTo(key: string, localPath: string): Promise<void> {
   const res = await client.send(new GetObjectCommand({ Bucket: bucket(), Key: key }));
   if (!res.Body) throw new Error(`empty object: ${key}`);

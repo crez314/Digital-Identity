@@ -2,7 +2,7 @@ import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const clientConfig = {
@@ -31,6 +31,16 @@ function presignClient(): S3Client {
 
 export async function presignedGet(key: string, ttl = 900): Promise<string> {
   return getSignedUrl(presignClient(), new GetObjectCommand({ Bucket: bucket(), Key: key }), { expiresIn: ttl });
+}
+
+/** 이미 만들어 둔 파생 이미지가 있는지 확인한다 — 없으면 만들고, 있으면 다시 만들지 않는다 */
+export async function objectExists(key: string): Promise<boolean> {
+  try {
+    await client.send(new HeadObjectCommand({ Bucket: bucket(), Key: key }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function downloadTo(key: string, localPath: string): Promise<void> {

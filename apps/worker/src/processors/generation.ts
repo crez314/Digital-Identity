@@ -16,6 +16,7 @@ import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
+import { presignReference } from '../lib/reference-image';
 import {
   buildChainStartFrame, CHAIN_ASSET_PREFIX, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
 } from '../lib/chain-start';
@@ -95,7 +96,8 @@ async function pickReferences(
       identityId,
       assetId: a.id,
       storageKey: a.storageKey,
-      signedUrl: await presignedGet(a.storageKey).catch(() => null),
+      // 제공자가 직접 내려받으므로 원본이 아니라 축소본을 넘긴다(reference-image.ts)
+      signedUrl: await presignReference(a.storageKey).catch(() => null),
       captureSlot: a.captureSlot,
       expression: a.expression,
       quality: a.qualityScore ? Number(a.qualityScore) : null,

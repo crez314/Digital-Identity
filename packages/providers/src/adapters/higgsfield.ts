@@ -162,7 +162,7 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
     fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.5/reference-to-video': {
-    images: { field: 'image_urls', max: 30, perIdentity: 2 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
+    images: { field: 'image_urls', max: 30, perIdentity: 8 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
     aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.0/image-to-video': {
@@ -170,14 +170,14 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
     fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.0/reference-to-video': {
-    images: { field: 'image_urls', max: 9, perIdentity: 2 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
+    images: { field: 'image_urls', max: 9, perIdentity: 8 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
     aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
   },
 
   // H3는 해상도가 '2K' 하나뿐이다
   '/minimax/h3/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: [[1440, '2K']] },
   '/minimax/h3/reference-to-video': {
-    images: { field: 'image_urls', max: 9, perIdentity: 2 }, durationType: 'integer', resolutions: [[1440, '2K']],
+    images: { field: 'image_urls', max: 9, perIdentity: 8 }, durationType: 'integer', resolutions: [[1440, '2K']],
     aspectRatios: H3_RATIOS,
   },
   // prompt_optimizer는 제공자가 프롬프트를 고쳐 쓴다 — CREZ가 넣은 신원 고정 문구가 사라질 수 있어 끈다

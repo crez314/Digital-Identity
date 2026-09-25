@@ -12,15 +12,18 @@ import { downloadTo, objectExists, presignedGet, uploadFrom } from './media-io';
  * 4명 × 7~8장이면 한 요청에 45MB가 걸리고, 그 다운로드가 길어지면 제출이 500으로 튕기거나
  * 접수된 뒤 "Generation failed"로 끝났다 — 2026-09-25 seedance 2.5 실측(3번 중 2번 실패).
  *
- * 장수를 줄이면 실패는 없어지지만 신원 유사도가 떨어진다(같은 프로젝트에서 29장 0.614 → 8장 0.512).
- * 그래서 장수를 줄이는 대신 **장당 용량**을 줄인다. 긴 변 768px JPEG면 장당 약 200KB라
- * 30장을 보내도 6MB다. 얼굴은 레퍼런스 안에서 여전히 크게 남는다.
+ * 장수를 줄이면 실패는 없어지지만 신원 유사도가 떨어져 보였다(29장 0.614 vs 8장 0.512 — 다만 장면이 달라
+ * 통제된 비교는 아니다). 그래서 장수를 줄이는 대신 **장당 용량**을 줄인다.
+ *
+ * 해상도는 과하게 줄이면 안 된다. 긴 변 768px·q4로 줄여 30장을 보냈더니 같은 장면에서 얼굴 유사도가
+ * 0.63~0.73 → 0.47~0.56으로 떨어졌다(2026-09-25 실측). 지금은 긴 변 1280px·q2로 둔다 — 원본 대비
+ * 용량은 크게 줄면서 얼굴 화소는 충분히 남는다.
  *
  * 한 번 만든 축소본은 스토리지에 남겨 다음 생성에서 다시 만들지 않는다.
  */
-const MAX_EDGE = Number(process.env.REFERENCE_IMAGE_MAX_EDGE ?? 768);
-/** ffmpeg -q:v (2=최고화질, 31=최저). 4는 눈에 띄는 손실 없이 용량이 크게 준다 */
-const JPEG_QUALITY = process.env.REFERENCE_IMAGE_QUALITY ?? '4';
+const MAX_EDGE = Number(process.env.REFERENCE_IMAGE_MAX_EDGE ?? 1280);
+/** ffmpeg -q:v (2=최고화질, 31=최저). 신원 판정에 쓰이는 사진이라 압축은 최소로 한다 */
+const JPEG_QUALITY = process.env.REFERENCE_IMAGE_QUALITY ?? '2';
 
 export function derivedKey(storageKey: string, maxEdge = MAX_EDGE): string {
   const dir = storageKey.slice(0, storageKey.lastIndexOf('/'));

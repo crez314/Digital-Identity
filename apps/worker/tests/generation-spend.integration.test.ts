@@ -4,10 +4,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
 import {
-  prisma, readSpendCredits, setSourceTrackCentroid, setProfileCentroids,
+  prisma, readSpendCredits, readSpendLedger, setSourceTrackCentroid, setProfileCentroids,
 } from '@crez/db';
 import { providerRegistry } from '@crez/providers';
 import { JOB_NAME } from '@crez/contracts';
+import { CrezError, ErrorCode } from '@crez/shared';
 import { GenerationService } from '../../api/src/modules/project/generation.service';
 import { SpendService } from '../../api/src/modules/spend/spend.service';
 import { ProjectService } from '../../api/src/modules/project/project.service';
@@ -209,6 +210,32 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     } as never);
     expect(response).toEqual({ skipped: 'RELEASED' });
     expect(provider.submit).not.toHaveBeenCalled();
+  });
+
+  it('제공자가 거절한 제출은 실지출에서 빠지고 실패 포함 총량에만 남는다', async () => {
+    // 콘텐츠 정책 거부·크레딧 부족·모델 차단은 제공자가 받아들이지 않은 것이라 돈이 나가지 않는다.
+    // 이것까지 실지출로 세면 실제 지출이 0원인데 그 달 생성이 전면 차단된다.
+    const fx = await fixture(6000); const p = await fx.project();
+    await generation.generate(fx.user, p.project.id, {}, 'rejected');
+    const provider = { code: 'fake-paid', planImages: () => ({ images: [], droppedReferenceIds: [] }),
+      estimateCost: () => 6,
+      submit: vi.fn().mockRejectedValue(new CrezError(ErrorCode.GEN_CONTENT_POLICY, 'higgsfield 400: nsfw',
+        { status: 400, sent: true, accepted: false }, 502)) };
+    vi.spyOn(providerRegistry, 'resolve').mockReturnValue(provider as never);
+    const job = { name: JOB_NAME.GENERATION_SUBMIT, data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 1, traceId: 'rejected',
+    } };
+    await generationProcessor(job as never);
+
+    const ledger = await readSpendLedger(prisma, fx.org.id);
+    expect(ledger.net).toBe(0);      // 실제로 나간 돈은 없다
+    expect(ledger.gross).toBe(6);    // 실패는 총량에 남아 "실패가 쏟아지는" 상황을 잡는다
+    const entry = await prisma.spendEntry.findUniqueOrThrow({
+      where: { segmentId_attempt: { segmentId: p.segment.id, attempt: 1 } },
+    });
+    expect(entry.status).toBe('FAILED');
+    // 한도가 풀렸으므로 원인을 고친 뒤 다시 실행할 수 있다
+    await expect(generation.generate(fx.user, p.project.id, {}, 'after-fix')).resolves.toBeTruthy();
   });
 
   it('제공자 접수 여부가 불명확한 실패는 추정액을 남긴다', async () => {

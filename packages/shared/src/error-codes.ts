@@ -90,3 +90,20 @@ export class CrezError extends Error {
     return { code: this.code, message: this.message, detail: this.detail ?? null, traceId: traceId ?? null };
   }
 }
+
+/**
+ * 이 실패는 과금되지 않았는가 — 지출 원장에서 빼도 되는가.
+ *
+ * 제공자가 응답으로 거절했거나(콘텐츠 정책·크레딧 부족·모델 차단) 요청이 네트워크에 나가지도
+ * 못했으면 돈이 나갈 수 없다. 반대로 전송 중 끊김·응답 파싱 실패는 **접수됐을 수 있으므로**
+ * 과금된 것으로 보아야 한다 — 과소 집계는 한도를 무력화한다.
+ */
+export function isChargelessFailure(err: unknown): boolean {
+  if (!(err instanceof CrezError)) return false;
+  const detail = err.detail as { sent?: boolean; accepted?: boolean } | null | undefined;
+  if (detail?.sent === false) return true;
+  if (detail?.accepted === false) return true;
+  return ([
+    ErrorCode.GEN_CONTENT_POLICY, ErrorCode.GEN_QUOTA_EXCEEDED, ErrorCode.GEN_NO_CAPABLE_MODEL,
+  ] as string[]).includes(err.code);
+}

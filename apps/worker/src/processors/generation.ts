@@ -10,7 +10,7 @@ import {
 } from '@crez/providers';
 import {
   CrezError, ErrorCode, MAX_CHAIN_LENGTH, MAX_GENERATION_ATTEMPT, QUEUE,
-  childLogger, storageKey, withIdentityAnchor, QUEUE_POLICY,
+  childLogger, isChargelessFailure, storageKey, withIdentityAnchor, QUEUE_POLICY,
 } from '@crez/shared';
 import { inspectPrompt, summarizeRisks } from '@crez/engine';
 import { JOB_NAME, type GenerationJobPayload, type GenerationPollJob } from '@crez/contracts';
@@ -529,7 +529,9 @@ async function submit(data: GenerationJobPayload) {
   } catch (e) {
     if (providerAccepted) throw e;
     const code = e instanceof CrezError ? e.code : ErrorCode.GEN_PROVIDER_ERROR;
-    await failJob(created.id, segment.id, project.id, data, code, e);
+    // 제공자가 거절했거나 요청이 나가지도 못한 실패는 과금되지 않는다 — 예약을 실지출에서 뺀다.
+    // 전송 중 끊김처럼 접수 여부를 모르는 실패는 그대로 두어 계속 실지출로 센다.
+    await failJob(created.id, segment.id, project.id, data, code, e, isChargelessFailure(e));
     // 콘텐츠 정책 거부는 재시도 대상이 아니다 (§8)
     if (code === ErrorCode.GEN_CONTENT_POLICY) return { failed: true, code };
     throw e;
@@ -790,14 +792,17 @@ async function cancelSubmission(data: CancelJob) {
 /**
  * 생성 job 실패 기록.
  *
- * providerConfirmed는 "제공자가 실패를 확정했다"는 뜻이다. 그 경우에만 원장을 FAILED로 옮겨
- * 실지출(실패 제외) 한도에서 뺀다 — 제공자는 실패한 요청을 과금하지 않는다고 밝히고 있다.
- * 제출 중 오류나 폴링 timeout은 접수됐을 수 있으므로 SUBMITTED로 남겨 실지출에 계속 포함한다.
+ * noCharge는 "이 실패에는 돈이 나가지 않았다"는 뜻이다. 그 경우에만 원장을 FAILED로 옮겨
+ * 실지출(실패 제외) 한도에서 뺀다. 해당하는 것은 둘이다.
+ *   · 제공자가 결과로 실패를 알려 준 경우(폴링)
+ *   · 제공자가 요청 자체를 거절했거나 요청이 네트워크에 나가지도 못한 경우(isChargelessFailure)
+ * 전송 중 끊김·폴링 timeout처럼 **접수 여부를 모르는** 실패는 SUBMITTED로 남겨 실지출에 계속 포함한다 —
+ * 과소 집계는 한도를 무력화한다.
  */
 async function failJob(
   generationJobId: string, segmentId: string, projectId: string,
   data: { traceId: string; orgId: string; attempt?: number }, code: string, detail: unknown,
-  providerConfirmed = false,
+  noCharge = false,
 ) {
   const failed = await prisma.generationJob.update({
     where: { id: generationJobId },
@@ -807,7 +812,7 @@ async function failJob(
     },
   });
 
-  if (providerConfirmed) {
+  if (noCharge) {
     await prisma.$transaction(async (tx) => {
       await lockOrganizationSpend(tx, data.orgId);
       await markSpendFailed(tx, data.orgId, segmentId, failed.attempt);

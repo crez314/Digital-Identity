@@ -244,7 +244,8 @@ export class HiggsfieldProvider implements GenerationProvider {
       throw new CrezError(
         ErrorCode.GEN_PROVIDER_ERROR,
         'HIGGSFIELD_KEY_ID / HIGGSFIELD_KEY_SECRET 미설정',
-        null, 500,
+        // 요청이 네트워크로 나가지도 못했다 — 과금될 수 없다는 뜻을 호출자에게 남긴다
+        { sent: false }, 500,
       );
     }
     return `Key ${id}:${secret}`;
@@ -272,7 +273,8 @@ export class HiggsfieldProvider implements GenerationProvider {
         throw new CrezError(
           classifyHiggsfieldError(detail),
           `higgsfield ${res.status}: ${detail}`,
-          { status: res.status, detail, path },
+          // 제공자가 응답으로 거절했다 — 접수되지 않았으므로 과금되지 않는다
+          { status: res.status, detail, path, sent: true, accepted: false },
           502,
         );
       }

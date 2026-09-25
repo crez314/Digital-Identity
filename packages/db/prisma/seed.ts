@@ -234,7 +234,7 @@ async function main() {
   await prisma.spendPolicy.upsert({
     where: { orgId: org.id },
     update: {},
-    create: { orgId: org.id, monthlyBudgetKrw: 100000 },
+    create: { orgId: org.id, monthlyBudgetKrw: 300000 },
   });
 
   // ── §12 Model Router 가중치 ────────────────────────────

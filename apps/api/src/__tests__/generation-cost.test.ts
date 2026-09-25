@@ -42,7 +42,14 @@ function setup(segments: ReturnType<typeof segment>[], opts: {
         Promise.resolve(where?.code ? models.filter((m) => m.code === where.code) : models)),
     },
     generationJob: { aggregate: vi.fn().mockResolvedValue({ _max: { attempt: 0 } }) },
+    spendPolicy: { findUnique: vi.fn().mockResolvedValue({ monthlyBudgetKrw: 300000, creditUnitPriceKrw: 1000 }) },
+    spendEntry: {
+      findMany: vi.fn().mockResolvedValue([]), upsert: vi.fn(), update: vi.fn(),
+      aggregate: vi.fn().mockResolvedValue({ _max: { attempt: 0 }, _sum: { amountCredits: 0 } }),
+    },
+    $executeRaw: vi.fn(),
   };
+  Object.assign(prisma, { $transaction: vi.fn((fn: (tx: typeof prisma) => unknown) => fn(prisma)) });
   const audit = { record: vi.fn() };
   const queue = { add: vi.fn().mockResolvedValue('job1') };
   const events = { publish: vi.fn() };

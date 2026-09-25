@@ -1,19 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
-import { getProfileCentroids, prisma } from '@crez/db';
+import { generationDispatchId, getProfileCentroids, lockOrganizationSpend, reserveSpend, prisma, Prisma } from '@crez/db';
 import {
   providerRegistry, route, StaticQuotaView,
   type GenerationRequest, type ModelDescriptor, type PromptAttachment, type ReferenceAsset,
 } from '@crez/providers';
 import {
   CrezError, ErrorCode, MAX_CHAIN_LENGTH, MAX_GENERATION_ATTEMPT, QUEUE,
-  childLogger, storageKey, withIdentityAnchor,
+  childLogger, storageKey, withIdentityAnchor, QUEUE_POLICY,
 } from '@crez/shared';
 import { inspectPrompt, summarizeRisks } from '@crez/engine';
 import { JOB_NAME, type GenerationJobPayload, type GenerationPollJob } from '@crez/contracts';
 import { emit } from '../lib/events';
 import { audit } from '../lib/audit';
 import { queues } from '../lib/queues';
+import { finalizeGeneration } from '../lib/generation-finalize';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
 import { presignReference } from '../lib/reference-image';
@@ -28,10 +29,23 @@ import {
  */
 export async function generationProcessor(job: Job): Promise<unknown> {
   switch (job.name) {
-    case JOB_NAME.GENERATION_SUBMIT:
-      return submit(job.data as GenerationJobPayload);
+    case JOB_NAME.GENERATION_SUBMIT: {
+      const data = job.data as GenerationJobPayload;
+      try { return await submit(data); } catch (error) {
+        // 제출 전에 준비가 실패한 경우 예약을 영구히 남기지 않는다.
+        // SUBMITTED 예약은 외부 접수 여부가 불명확하므로 재제출/해제하지 않는다.
+        const entry = await prisma.spendEntry.findUnique({
+          where: { segmentId_attempt: { segmentId: data.segmentId, attempt: data.attempt } },
+        });
+        if (isLastAttempt(job) && (!entry || entry.status === 'RESERVED')) {
+          await failRouting(data.segmentId, data.projectId!, data,
+            error instanceof CrezError ? error : new CrezError(ErrorCode.GEN_PROVIDER_ERROR, String(error)));
+        }
+        throw error;
+      }
+    }
     case JOB_NAME.GENERATION_POLL:
-      // 큐 재시도가 남아 있는지 알아야 결과물 수집 실패를 확정할지 판단할 수 있다
+      // 결과 수집/인계 장애는 큐 재시도가 끝나도 reconciler가 복구한다.
       return poll(
         job.data as GenerationPollJob & { projectId: string; segmentId: string; orgId: string },
         isLastAttempt(job),
@@ -177,7 +191,20 @@ async function submit(data: GenerationJobPayload) {
   });
   if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트 없음', data, 404);
 
+  if (segment.status !== 'GENERATING') return { skipped: segment.status };
+  const previous = await prisma.generationJob.findUnique({
+    where: { segmentId_attempt: { segmentId: segment.id, attempt: data.attempt } },
+  });
+  // 큐 재전달은 외부 제공자에 두 번 제출하지 않는다. 접수된 작업은 poll reconciler가 맡는다.
+  if (previous) return { skipped: previous.status, generationJobId: previous.id };
+  const entry = await prisma.spendEntry.findUnique({
+    where: { segmentId_attempt: { segmentId: segment.id, attempt: data.attempt } },
+  });
+  if (entry && entry.status !== 'RESERVED') return { skipped: entry.status };
+
   const project = segment.project;
+  // 조직은 큐의 문자열이 아니라 실제 프로젝트에서 정한다.
+  data = { ...data, orgId: project.orgId };
   const config = project.config as {
     resolution?: string; fps?: number; requiredMode?: string; preferredModel?: string; aspectRatio?: string;
   };
@@ -230,7 +257,7 @@ async function submit(data: GenerationJobPayload) {
     ? Math.floor(Math.random() * 2_147_483_647)
     : Number(`${segment.segmentIndex}${data.attempt}`.slice(0, 9));
 
-  const castWithRefs = [];
+  const castWithRefs: GenerationRequest['cast'] = [];
   for (const c of project.cast) {
     castWithRefs.push({
       identityId: c.identityId,
@@ -379,53 +406,86 @@ async function submit(data: GenerationJobPayload) {
     return { failed: true, code: ErrorCode.GEN_PROVIDER_ERROR };
   }
 
-  const created = await prisma.generationJob.create({
-    data: {
-      id: generationJobId,
-      segmentId: segment.id,
-      attempt: data.attempt,
-      modelId: decision.model.id,
-      routingTrace: decision.trace as never,
-      params: {
-        mode: request.mode, durationMs: request.durationMs, fps: request.fps,
-        resolution: request.resolution, aspectRatio: request.aspectRatio,
-        // 제공자에 실제로 보낸 프롬프트와 운영자가 쓴 원문을 함께 남긴다 — 결과를 나중에 설명하려면 둘 다 필요하다
-        prompt: request.prompt, operatorPrompt,
-        promptRisks: promptRisks.map((r) => ({ kind: r.kind, term: r.term, message: r.message })),
-        conditioningStrength,
-        strategy: data.strategy ?? null,
-        references: castWithRefs.map((c) => ({
-          identityId: c.identityId,
-          // 이어 붙인 시작 프레임과 사람이 지정한 시작 프레임은 identity_asset 행이 아니다 —
-          // 여기 섞으면 결과 조회 때 자산을 UUID로 되찾는 과정에서 통째로 실패한다(2026-09-17 실측).
-          assetIds: c.references.map((r) => r.assetId).filter((id) => !isSyntheticAsset(id)),
-        })),
-        // 이어 붙인 사실은 따로 남긴다 — 나중에 "이 컷은 무엇에서 이어졌나"를 설명할 수 있어야 한다
-        chainStart: chain ? { fromSegmentId: chain.fromSegmentId, storageKey: chain.storageKey } : null,
-        // 지정한 시작 프레임도 마찬가지다. 첨부가 아니라 치환이라 droppedReferenceIds에 잡히지 않으므로,
-        // 이 기록이 없으면 "지정한 이미지가 쓰였는가"를 화면에서 답할 방법이 없다.
-        pinnedStart: pinnedRef ? { referenceId: pinnedRef.id, storageKey: pinnedRef.storageKey } : null,
-        attachments: attachments.map((a) => ({ referenceId: a.referenceId, kind: a.kind, slotIndex: a.slotIndex })),
-        imagePlan: {
-          images: imagePlan.images.map(({ url: _url, ...rest }) => rest),
-          droppedReferenceIds: imagePlan.droppedReferenceIds,
+  let created;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      await lockOrganizationSpend(tx, project.orgId);
+      const current = await tx.segment.findUnique({ where: { id: segment.id } });
+      if (!current || current.status !== 'GENERATING') return null;
+      const previous = await tx.generationJob.findUnique({
+        where: { segmentId_attempt: { segmentId: segment.id, attempt: data.attempt } },
+      });
+      if (previous) return null;
+      const reservation = await tx.spendEntry.findUnique({
+        where: { segmentId_attempt: { segmentId: segment.id, attempt: data.attempt } },
+      });
+      if (reservation && reservation.status !== 'RESERVED') return null;
+      const free = decision.model.code.startsWith('mock') || (decision.model.capabilities as { billable?: boolean }).billable === false;
+      await reserveSpend(tx, project.orgId, [{
+        projectId: project.id, segmentId: segment.id, attempt: data.attempt,
+        amountCredits: free ? 0 : provider.estimateCost(request, decision.model),
+      }]);
+      await tx.spendEntry.update({
+        where: { segmentId_attempt: { segmentId: segment.id, attempt: data.attempt } },
+        data: { status: 'SUBMITTED', createdAt: new Date() },
+      });
+      const created = await tx.generationJob.create({
+        data: {
+          id: generationJobId,
+          segmentId: segment.id,
+          attempt: data.attempt,
+          modelId: decision.model.id,
+          routingTrace: decision.trace as never,
+          params: {
+            traceId: data.traceId, mode: request.mode, durationMs: request.durationMs, fps: request.fps,
+            resolution: request.resolution, aspectRatio: request.aspectRatio,
+            // 제공자에 실제로 보낸 프롬프트와 운영자가 쓴 원문을 함께 남긴다 — 결과를 나중에 설명하려면 둘 다 필요하다
+            prompt: request.prompt, operatorPrompt,
+            promptRisks: promptRisks.map((r) => ({ kind: r.kind, term: r.term, message: r.message })),
+            conditioningStrength,
+            strategy: data.strategy ?? null,
+            references: castWithRefs.map((c) => ({
+              identityId: c.identityId,
+              // 이어 붙인 시작 프레임과 사람이 지정한 시작 프레임은 identity_asset 행이 아니다 —
+              // 여기 섞으면 결과 조회 때 자산을 UUID로 되찾는 과정에서 통째로 실패한다(2026-09-17 실측).
+              assetIds: c.references.map((r) => r.assetId).filter((id) => !isSyntheticAsset(id)),
+            })),
+            // 이어 붙인 사실은 따로 남긴다 — 나중에 "이 컷은 무엇에서 이어졌나"를 설명할 수 있어야 한다
+            chainStart: chain ? { fromSegmentId: chain.fromSegmentId, storageKey: chain.storageKey } : null,
+            // 지정한 시작 프레임도 마찬가지다. 첨부가 아니라 치환이라 droppedReferenceIds에 잡히지 않으므로,
+            // 이 기록이 없으면 "지정한 이미지가 쓰였는가"를 화면에서 답할 방법이 없다.
+            pinnedStart: pinnedRef ? { referenceId: pinnedRef.id, storageKey: pinnedRef.storageKey } : null,
+            attachments: attachments.map((a) => ({ referenceId: a.referenceId, kind: a.kind, slotIndex: a.slotIndex })),
+            imagePlan: {
+              images: imagePlan.images.map(({ url: _url, ...rest }) => rest),
+              droppedReferenceIds: imagePlan.droppedReferenceIds,
+            },
+          } as never,
+          seed: BigInt(seed),
+          status: 'QUEUED',
+          startedAt: new Date(),
         },
-      } as never,
-      seed: BigInt(seed),
-      status: 'QUEUED',
-      startedAt: new Date(),
-    },
-  });
-
-  // 재생성 이력과 이번 job을 연결한다 (§11)
-  if (data.regenerationTaskId) {
-    await prisma.regenerationTask.update({
-      where: { id: data.regenerationTaskId }, data: { resultJobId: created.id },
+      });
+      if (data.regenerationTaskId) {
+        await tx.regenerationTask.update({
+          where: { id: data.regenerationTaskId }, data: { resultJobId: created.id },
+        });
+      }
+      return created;
     });
+  } catch (error) {
+    if (error instanceof CrezError) {
+      await failRouting(segment.id, project.id, data, error);
+      return { failed: true, code: error.code };
+    }
+    throw error;
   }
+  if (!created) return { skipped: 'already submitted or cancelled' };
 
+  let providerAccepted = false;
   try {
     const result = await provider.submit(request, decision.model);
+    providerAccepted = true;
     await prisma.generationJob.update({
       where: { id: created.id },
       data: { status: 'SUBMITTED', providerJobId: result.providerJobId },
@@ -461,6 +521,7 @@ async function submit(data: GenerationJobPayload) {
     log.info({ model: decision.model.code, providerJobId: result.providerJobId }, 'generation submitted');
     return { generationJobId: created.id, model: decision.model.code, providerJobId: result.providerJobId };
   } catch (e) {
+    if (providerAccepted) throw e;
     const code = e instanceof CrezError ? e.code : ErrorCode.GEN_PROVIDER_ERROR;
     await failJob(created.id, segment.id, project.id, data, code, e);
     // 콘텐츠 정책 거부는 재시도 대상이 아니다 (§8)
@@ -469,18 +530,14 @@ async function submit(data: GenerationJobPayload) {
   }
 }
 
-/**
- * 이번이 큐의 마지막 시도인가. BullMQ가 더 재시도하지 않을 때만 실패를 확정한다 —
- * 일시적인 내려받기 실패로 이미 지불한 결과를 버리지 않기 위해서다.
- * reconciler가 새 job으로 다시 집어가므로 여기서 확정하지 않아도 유실되지 않는다.
- */
+/** 제출 준비가 큐의 마지막 재시도에서도 실패하면 미제출 예약을 해제한다. */
 export function isLastAttempt(job: { attemptsMade?: number; opts?: { attempts?: number } }): boolean {
   const made = job.attemptsMade ?? 0;
   const allowed = job.opts?.attempts ?? 1;
   return made + 1 >= allowed;
 }
 
-/** Prisma 유일 제약 위반 — 같은 job의 결과물을 다른 폴링이 먼저 저장했다 */
+/** Prisma 유일 제약 위반 판별. */
 export function isUniqueViolation(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { code?: string }).code === 'P2002';
 }
@@ -495,7 +552,9 @@ async function poll(
     where: { id: data.generationJobId }, include: { model: true, segment: true },
   });
   if (!genJob) return { skipped: 'job gone' };
-  if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(genJob.status)) return { skipped: genJob.status };
+  if (['FAILED', 'CANCELLED'].includes(genJob.status)) return { skipped: genJob.status };
+  const saved = await prisma.generationOutput.findUnique({ where: { jobId: genJob.id } });
+  if (saved) return finalizeGeneration(genJob.id, data);
 
   const descriptor: ModelDescriptor = {
     id: genJob.model.id, code: genJob.model.code, provider: genJob.model.provider as never,
@@ -536,72 +595,20 @@ async function poll(
     return { state: state.state, code };
   }
 
-  // ── SUCCEEDED ──────────────────────────────────────
-  // 폴링 체인이 재시도 등으로 둘 이상 살아 있으면 여기 동시에 도착한다. 상태 검사만으로는
-  // 같은 밀리초에 들어온 것들을 막지 못해 결과물과 QC가 중복 생성된다(실측: output 3~4건 = ML 비용 3배).
-  //
-  // 그렇다고 상태를 먼저 SUCCEEDED로 바꿔 선점하면 안 된다. 내려받기 도중 워커가 죽으면
-  // "결과물 없는 성공"으로 남는데, 폴링은 종료 상태를 건너뛰고 reconciler는 SUBMITTED·RUNNING만 훑어
-  // 아무도 복구하지 못한다. 유료로 만든 결과를 다시 가져올 길이 사라진다.
-  //
-  // 그래서 순서를 뒤집는다 — 내려받아 저장에 성공한 다음에 SUCCEEDED로 확정한다.
-  // 중복은 generation_output.job_id 유일 제약이 막는다. 둘이 동시에 내려받아도 저장은 하나만 성공한다.
-  const already = await prisma.generationOutput.findUnique({ where: { jobId: genJob.id } });
-  if (already) return { skipped: 'already finalized' };
-
+  // 결과를 먼저 수집하고 출력·성공 상태·정산을 한 트랜잭션으로 확정한다.
   let result;
-  let output;
   try {
     const request = await rebuildRequest(genJob.id);
     const fetched = await provider.fetchResult(data.providerJobId, request, descriptor);
-    // 어댑터가 알려준 위치의 결과물을 §15 스토리지 레이아웃의 키로 실체화한다.
     result = await materializeOutput(fetched, request.outputKey, {
-      isMock: provider.code === 'mock',
-      traceId: data.traceId,
-    });
-
-    output = await prisma.generationOutput.create({
-      data: {
-        jobId: genJob.id, storageKey: result.storageKey,
-        durationMs: result.durationMs, fps: result.fps, width: result.width, height: result.height,
-      },
+      isMock: provider.code === 'mock', traceId: data.traceId,
     });
   } catch (e) {
-    // 경쟁에서 진 경우 — 다른 폴링이 먼저 저장했다. 실패가 아니므로 조용히 물러난다.
-    if (isUniqueViolation(e)) return { skipped: 'already finalized' };
-
-    // 내려받기·저장 실패는 여기서 확정하지 않는다. job은 RUNNING으로 남아 큐 재시도와
-    // reconciler가 다시 집어간다. 제공자에 결과가 남아 있는 한 다시 가져올 수 있고,
-    // 여기서 FAILED로 못 박으면 이미 지불한 결과를 버리게 된다.
-    if (!lastAttempt) {
-      log.warn({ err: String(e) }, '결과물 수집 실패 — 재시도 대상으로 남긴다');
-      throw e;
-    }
-    // 큐 재시도를 다 쓰고도 안 되면 그때 실패로 확정한다
-    await failJob(genJob.id, data.segmentId, data.projectId, data, ErrorCode.GEN_PROVIDER_ERROR, e);
+    log.warn({ err: String(e), lastAttempt }, '결과물 수집 실패 — 폴링 복구 대상으로 남긴다');
     throw e;
   }
-
-  // 결과물이 자리를 잡은 뒤에야 성공이다
-  await prisma.generationJob.update({
-    where: { id: genJob.id },
-    data: { status: 'SUCCEEDED', finishedAt: new Date(), costAmount: result.costAmount },
-  });
-  await prisma.segment.update({ where: { id: data.segmentId }, data: { status: 'QC' } });
-
-  await emit({
-    type: 'SEGMENT_STATUS', projectId: data.projectId, segmentId: data.segmentId,
-    payload: { status: 'QC', attempt: genJob.attempt }, traceId: data.traceId,
-  });
-
-  // QC 큐로 넘긴다 (§8)
-  await queues.qc.add(JOB_NAME.QC_RUN, {
-    traceId: data.traceId, orgId: data.orgId, projectId: data.projectId,
-    segmentId: data.segmentId, outputId: output.id, attempt: genJob.attempt,
-  });
-
-  log.info({ outputId: output.id, cost: result.costAmount }, 'generation succeeded → QC queued');
-  return { state: 'SUCCEEDED', outputId: output.id };
+  // DB/QC 큐 장애는 유료 결과를 FAILED로 확정하지 않는다. 미완료 상태를 reconciler가 복구한다.
+  return finalizeGeneration(genJob.id, data, result);
 }
 
 /**
@@ -672,6 +679,13 @@ async function failRouting(
   segmentId: string, projectId: string,
   data: { traceId: string; orgId: string; attempt: number }, err: CrezError,
 ) {
+  await prisma.$transaction(async (tx) => {
+    await lockOrganizationSpend(tx, data.orgId);
+    await tx.spendEntry.updateMany({
+      where: { orgId: data.orgId, segmentId, attempt: data.attempt, status: 'RESERVED' },
+      data: { status: 'RELEASED' },
+    });
+  });
   // 제출 전에 실패했으므로 한도 카운터를 되돌린다. job 시도 번호(data.attempt)와 한도 카운터는 다른 값이다.
   const current = await prisma.segment.findUnique({ where: { id: segmentId }, select: { attemptCount: true } });
   await prisma.segment.update({
@@ -809,7 +823,7 @@ export async function reconcileSubmittedJobs(): Promise<number> {
       startedAt: { lt: new Date(Date.now() - staleAfterMs) },
       providerJobId: { not: null },
     },
-    include: { segment: true },
+    include: { segment: { include: { project: true } } },
     take: 100,
   });
 
@@ -817,13 +831,48 @@ export async function reconcileSubmittedJobs(): Promise<number> {
     await queues.generation.add(
       JOB_NAME.GENERATION_POLL,
       {
-        traceId: `reconcile-${j.id}`, orgId: '', projectId: j.segment.projectId,
+        traceId: (j.params as { traceId?: string }).traceId ?? `reconcile-${j.id}`,
+        orgId: j.segment.project.orgId, projectId: j.segment.projectId,
         segmentId: j.segmentId, generationJobId: j.id,
         providerJobId: j.providerJobId as string, pollCount: 0,
       },
       { delay: 1000, jobId: `reconcile-${j.id}-${Date.now()}` },
     );
   }
+  const pendingQc = await prisma.generationOutput.findMany({
+    where: { qcQueuedAt: null, job: { status: 'SUCCEEDED' } },
+    include: { job: { include: { segment: { include: { project: true } } } } },
+    orderBy: { createdAt: 'asc' }, take: 100,
+  });
+  for (const output of pendingQc) {
+    const j = output.job;
+    try {
+      await finalizeGeneration(j.id, {
+        traceId: (j.params as { traceId?: string }).traceId ?? `reconcile-${j.id}`,
+        orgId: j.segment.project.orgId, projectId: j.segment.projectId, segmentId: j.segmentId,
+      });
+    } catch (error) {
+      childLogger({ component: 'reconciler' }).warn({ err: String(error), outputId: output.id }, 'QC 인계 재시도 실패');
+    }
+  }
+  const pendingDispatch = await prisma.spendEntry.findMany({
+    where: { status: 'RESERVED', dispatchedAt: null, dispatch: { not: Prisma.DbNull } }, orderBy: { createdAt: 'asc' }, take: 100,
+  });
+  for (const entry of pendingDispatch) {
+    if (!entry.dispatch) continue;
+    const dispatch = entry.dispatch as { payload: GenerationJobPayload; priority: number };
+    try {
+      await queues.generation.add(JOB_NAME.GENERATION_SUBMIT, dispatch.payload, {
+        jobId: generationDispatchId(entry.segmentId, entry.attempt), priority: dispatch.priority,
+        attempts: QUEUE_POLICY[QUEUE.GENERATION].attempts,
+        backoff: { type: 'exponential', delay: QUEUE_POLICY[QUEUE.GENERATION].backoffMs },
+        removeOnComplete: false, removeOnFail: false,
+      });
+      await prisma.spendEntry.update({ where: { id: entry.id }, data: { dispatchedAt: new Date() } });
+    } catch (error) {
+      childLogger({ component: 'reconciler' }).warn({ err: String(error), entryId: entry.id }, '생성 큐 인계 재시도 실패');
+    }
+  }
   if (stale.length > 0) childLogger({ component: 'reconciler' }).info({ count: stale.length }, 'requeued stale polls');
-  return stale.length;
+  return stale.length + pendingQc.length + pendingDispatch.filter((e) => e.dispatch).length;
 }

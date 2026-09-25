@@ -1,5 +1,6 @@
 'use client';
 
+import { generationEstimateKey, generationRunErrors } from '@/lib/generation-state';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useState } from 'react';
@@ -176,25 +177,27 @@ export default function ProjectDetail() {
     qc.invalidateQueries({ queryKey: ['project-segments', id] });
     qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
     qc.invalidateQueries({ queryKey: ['project', id] });
+    qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
   });
 
   // 실행 전 견적 — 4분짜리는 구간 48개라 버튼 한 번이 수십 건의 유료 생성이다(§12.1)
   const estimate = useQuery({
-    queryKey: ['generate-estimate', id],
+    queryKey: generationEstimateKey(id, project.data?.config, segments.data),
     queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
-    enabled: Boolean(project.data),
+    enabled: Boolean(project.data && segments.data),
   });
   // 이번 실행으로 큐에 넣은 구간 — 알림이 "무엇이 몇 개 도는지"를 이 기준으로 센다
-  const [run, setRun] = useState<{ ids: string[]; at: string } | null>(null);
+  const [run, setRun] = useState<{ ids: string[]; traceId: string } | null>(null);
   // 닫으면 이번 실행에 대해서는 다시 뜨지 않는다 — 다음 실행에서 다시 연다
   const [runDismissed, setRunDismissed] = useState(false);
   const generate = useMutation({
     // 화면에 보여 준 견적을 그대로 상한으로 올려 보낸다 — 본 것과 나가는 것이 같아야 한다
-    mutationFn: () => post<{ submitted: Array<{ segmentId: string }> }>(
+    mutationFn: () => post<{ submitted: Array<{ segmentId: string }>; traceId: string }>(
       `/projects/${id}/generate`, { maxCost: estimate.data?.max },
     ),
+    onError: () => qc.invalidateQueries({ queryKey: ['generate-estimate', id] }),
     onSuccess: (res) => {
-      setRun({ ids: res.submitted.map((x) => x.segmentId), at: new Date().toISOString() });
+      setRun({ ids: res.submitted.map((x) => x.segmentId), traceId: res.traceId });
       setRunDismissed(false);
       qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
       qc.invalidateQueries({ queryKey: ['project-segments', id] });
@@ -205,6 +208,7 @@ export default function ProjectDetail() {
   const resetSegment = useMutation({
     mutationFn: (segmentId: string) => post(`/projects/${id}/segments/${segmentId}/reset`, {}),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
       qc.invalidateQueries({ queryKey: ['project-segments', id] });
       qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
     },
@@ -229,11 +233,7 @@ export default function ProjectDetail() {
   // 실행 알림 — 이번 실행에 든 구간만 센다. 화면을 새로 열었으면(run 없음) 진행 중인 것만 보여 준다.
   const runSegments = (segments.data ?? []).filter((s) => !run || run.ids.includes(s.id));
   const runCount = (...st: string[]) => runSegments.filter((s) => st.includes(s.status)).length;
-  const runErrors: RunError[] = run
-    ? events
-        .filter((e) => e.type === 'ERROR' && e.at >= run.at && (!run.ids.length || !e.segmentId || run.ids.includes(e.segmentId)))
-        .map((e) => ({ code: e.payload.code as string | undefined, message: e.payload.message as string | undefined, at: e.at }))
-    : [];
+  const runErrors: RunError[] = generationRunErrors(events, run);
   // 생성 실행이 실제로 집어가는 구간 — 대기·실패이면서 시도 한도가 남은 것 (api generate와 같은 기준)
   const generatable = (segments.data ?? []).filter(
     (s) => ['PENDING', 'FAILED'].includes(s.status) && s.attemptCount < MAX_ATTEMPT,
@@ -272,7 +272,7 @@ export default function ProjectDetail() {
               {budgetText(estimate.data) ? <span className="ml-1 text-neutral-500">· {budgetText(estimate.data)}</span> : null}
             </span>
           ) : null}
-          <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT' || generatable === 0}>생성 실행</Button>
+          <Button onClick={() => generate.mutate()} disabled={generate.isPending || estimate.isFetching || !estimate.data || estimate.isError || status === 'DRAFT' || generatable === 0}>생성 실행</Button>
           <Button variant="secondary" onClick={() => cancel.mutate()}>취소</Button>
           <Button variant="secondary" onClick={() => master.mutate()}>마스터 생성</Button>
           <Button variant="danger" onClick={confirmRemove} disabled={remove.isPending || inFlight > 0}>
@@ -288,7 +288,7 @@ export default function ProjectDetail() {
         </p>
       ) : null}
 
-      <ErrorBox error={generate.error ?? cancel.error ?? master.error ?? remove.error} />
+      <ErrorBox error={generate.error ?? estimate.error ?? cancel.error ?? master.error ?? remove.error} />
 
       {runDismissed ? null : (
       <RunProgress

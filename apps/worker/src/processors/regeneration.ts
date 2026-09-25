@@ -1,5 +1,5 @@
 import type { Job } from 'bullmq';
-import { prisma } from '@crez/db';
+import { nextGenerationAttempt, prisma } from '@crez/db';
 import { classifyOutcome, decideStrategy, type PriorAttempt } from '@crez/engine';
 import { CrezError, ErrorCode, childLogger } from '@crez/shared';
 import { JOB_NAME, type RegenerationJobPayload } from '@crez/contracts';
@@ -113,8 +113,7 @@ export async function regenerationProcessor(job: Job): Promise<unknown> {
   });
 
   // 시도 번호는 job 이력에서 이어 붙이고(유일 제약), 한도 카운터는 따로 올린다 (§5.1)
-  const last = await prisma.generationJob.aggregate({ _max: { attempt: true }, where: { segmentId: segment.id } });
-  const attempt = Math.max(last._max.attempt ?? 0, segment.attemptCount) + 1;
+  const attempt = await nextGenerationAttempt(prisma, segment.id, segment.attemptCount);
   await prisma.segment.update({
     where: { id: segment.id }, data: { status: 'GENERATING', attemptCount: segment.attemptCount + 1 },
   });

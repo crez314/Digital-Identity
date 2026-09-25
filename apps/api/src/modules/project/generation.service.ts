@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { PrismaClient } from '@crez/db';
-import { COST_CONFIRM_THRESHOLD, CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE } from '@crez/shared';
+import { generationDispatchId, lockOrganizationSpend, nextGenerationAttempt, reserveSpend, type Prisma, type PrismaClient } from '@crez/db';
+import { COST_CONFIRM_THRESHOLD, childLogger, CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE } from '@crez/shared';
 import { estimateRun } from '@crez/engine';
 import { JOB_NAME } from '@crez/contracts';
 import { PRISMA } from '../../common/prisma.module';
@@ -39,7 +39,9 @@ export class GenerationService {
   async estimate(user: AuthUser, projectId: string, input: { segmentIds?: string[]; modelHint?: string }) {
     const project = await this.prisma.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
     if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
-    const segments = await this.selectSegments(projectId, input.segmentIds);
+    const segments = (await this.selectSegments(projectId, input.segmentIds)).filter(
+      (s) => !['GENERATING', 'QC'].includes(s.status) && s.attemptCount < MAX_GENERATION_ATTEMPT,
+    );
     const cost = await this.estimateCost(project, segments, input.modelHint);
     // 화면이 "이번 실행 얼마 / 이번 달 남은 한도 얼마"를 함께 보여줄 수 있어야 한다
     const spend = await this.spend.status(user);
@@ -76,80 +78,64 @@ export class GenerationService {
       traceId,
     );
 
-    const segments = await this.selectSegments(projectId, input.segmentIds);
-    if (segments.length === 0) {
-      // 어떤 상태라서 빠졌는지 알려준다 — "없습니다"만으로는 무엇을 해야 할지 알 수 없다
-      const byStatus = await this.prisma.segment.groupBy({ by: ['status'], where: { projectId }, _count: true });
-      const summary = byStatus.map((g) => `${g.status} ${g._count}개`).join(', ') || '정의된 구간 없음';
-      throw new CrezError(
-        ErrorCode.PRJ_INVALID_STATE,
-        `생성 대기(PENDING)·실패(FAILED) 구간이 없습니다 — 현재 ${summary}. `
-        + 'MANUAL_REVIEW 구간은 QC 화면에서 재생성을 요청하거나 승인하고, 되돌리려면 구간 초기화를 쓰세요.',
-        { statuses: Object.fromEntries(byStatus.map((g) => [g.status, g._count])) },
-        409,
-      );
-    }
-
-    // 실제로 제출할 구간만 견적에 넣는다 — 한도를 다 쓴 구간은 어차피 나가지 않는다
-    const willSubmit = segments.filter(
-      (s) => s.status !== 'GENERATING' && s.status !== 'QC' && s.attemptCount < MAX_GENERATION_ATTEMPT,
-    );
-    const cost = await this.estimateCost(project, willSubmit, input.modelHint);
-
-    // 조직 월 한도 — 돈이 나가는 실행에만 건다. 무료 모델까지 막으면 파이프라인 검증이 멈춘다(§12.1).
-    const budget = cost.free ? null : await this.spend.assertWithinBudget(user.orgId, cost.max);
-
+    // 읽기 → 한도 검사 → 예약 → 구간 상태 변경을 조직 잠금 안에서 함께 확정한다.
+    // 다른 API 인스턴스도 같은 잠금을 쓰므로 워커가 시작하기 전 연속 요청도 이 예약을 본다.
     const cap = input.maxCost ?? costConfirmThreshold();
-    if (cost.max > cap) {
-      throw new CrezError(
-        ErrorCode.PRJ_INVALID_STATE,
-        input.maxCost !== undefined
-          ? `견적 ${cost.max}이 지정한 상한 ${cap}을 넘습니다 — 구간을 줄이거나 상한을 올리세요`
-          : `견적 ${cost.max}이 확인 없이 진행하는 한도 ${cap}을 넘습니다 — maxCost로 상한을 명시해야 제출합니다`
-            + ` (구간 ${cost.segmentCount}개, 최악의 경우 ${cost.worstCase})`,
-        { estimate: cost, cap },
-        409,
-      );
-    }
-
-    const submitted: Array<{ segmentId: string; jobId: string; attempt: number }> = [];
-    for (const seg of segments) {
-      if (seg.status === 'GENERATING' || seg.status === 'QC') continue;
-      if (seg.attemptCount >= MAX_GENERATION_ATTEMPT) {
-        // 한도를 넘긴 세그먼트는 자동 실행 대상이 아니다 — 수동 재생성 경로로만 처리한다.
-        continue;
+    const { planned, cost, budget } = await this.prisma.$transaction(async (tx) => {
+      await lockOrganizationSpend(tx, user.orgId);
+      const currentProject = await tx.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
+      if (!currentProject || !['READY', 'RUNNING', 'REVIEW'].includes(currentProject.status)) {
+        throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '프로젝트 상태가 바뀌었습니다. 다시 확인하세요', null, 409);
       }
-      // 기록상 시도 번호는 job 이력에서 이어 붙인다. generation_job은 (segment_id, attempt)가 유일하므로,
-      // 구간 초기화로 attemptCount가 0으로 돌아간 뒤 1부터 다시 쓰면 저장이 실패해 구간이 GENERATING에 멈춘다.
-      // 한도 판정은 segment.attemptCount(초기화 가능)로, 기록·스토리지 경로는 job attempt로 나눈다.
-      const last = await this.prisma.generationJob.aggregate({ _max: { attempt: true }, where: { segmentId: seg.id } });
-      const attempt = Math.max(last._max.attempt ?? 0, seg.attemptCount) + 1;
-      await this.prisma.segment.update({
-        where: { id: seg.id }, data: { status: 'GENERATING', attemptCount: seg.attemptCount + 1 },
-      });
-      const jobId = await this.queue.add(
-        QUEUE.GENERATION, JOB_NAME.GENERATION_SUBMIT,
-        { traceId, orgId: user.orgId, projectId, segmentId: seg.id, attempt, modelHint: input.modelHint },
-        { priority: input.priority ?? 5 },
+      const segments = await this.selectSegments(projectId, input.segmentIds, tx);
+      const willSubmit = segments.filter(
+        (s) => !['GENERATING', 'QC'].includes(s.status) && s.attemptCount < MAX_GENERATION_ATTEMPT,
       );
-      submitted.push({ segmentId: seg.id, jobId, attempt });
-    }
+      if (!willSubmit.length) {
+        throw new CrezError(ErrorCode.PRJ_INVALID_STATE,
+          '생성할 구간이 없습니다. 진행 상태와 시도 한도를 확인하거나 실패 구간을 초기화하세요', null, 409);
+      }
+      const cost = await this.estimateCost(currentProject, willSubmit, input.modelHint, tx);
+      if (cost.max > cap) {
+        throw new CrezError(ErrorCode.PRJ_INVALID_STATE,
+          `견적 ${cost.max}이 상한 ${cap}을 넘습니다 — 견적을 다시 확인한 뒤 maxCost로 상한을 지정하세요`,
+          { estimate: cost, cap }, 409);
+      }
+      const planned = [];
+      for (const seg of willSubmit) {
+        const attempt = await nextGenerationAttempt(tx, seg.id, seg.attemptCount);
+        const payload = {
+          traceId, orgId: user.orgId, projectId, segmentId: seg.id, attempt,
+          ...(input.modelHint ? { modelHint: input.modelHint } : {}),
+        };
+        planned.push({
+          projectId, segmentId: seg.id, attempt,
+          amountCredits: cost.perSegment.find((c) => c.segmentId === seg.id)!.max,
+          dispatch: { payload, priority: input.priority ?? 5 },
+        });
+        await tx.segment.update({ where: { id: seg.id },
+          data: { status: 'GENERATING', attemptCount: seg.attemptCount + 1 } });
+      }
+      const budget = await reserveSpend(tx, user.orgId, planned);
+      await tx.project.update({ where: { id: projectId }, data: { status: 'RUNNING' } });
+      return { planned, cost, budget: cost.free ? null : budget };
+    }, { maxWait: 10000, timeout: 20000 });
 
-    // 고른 구간이 전부 걸러졌으면 조용히 빈 결과를 돌려주지 않는다 — 눌렀는데 아무 일도 없는 것처럼 보인다
-    if (submitted.length === 0) {
-      const exhausted = segments.filter((s) => s.attemptCount >= MAX_GENERATION_ATTEMPT).length;
-      throw new CrezError(
-        ErrorCode.PRJ_INVALID_STATE,
-        exhausted > 0
-          ? `구간 ${exhausted}개가 시도 한도 ${MAX_GENERATION_ATTEMPT}회를 모두 썼습니다 — 원인을 고친 뒤 구간 초기화로 되돌리거나 QC 화면에서 재생성을 요청하세요`
-          : '생성·QC가 진행 중이라 새로 제출할 구간이 없습니다',
-        { exhausted, selected: segments.length },
-        409,
-      );
-    }
-
-    if (project.status !== 'RUNNING') {
-      await this.prisma.project.update({ where: { id: projectId }, data: { status: 'RUNNING' } });
+    const submitted = [];
+    for (const entry of planned) {
+      const jobId = generationDispatchId(entry.segmentId, entry.attempt);
+      try {
+        await this.queue.add(QUEUE.GENERATION, JOB_NAME.GENERATION_SUBMIT, entry.dispatch.payload,
+          { jobId, priority: entry.dispatch.priority, removeOnComplete: false, removeOnFail: false });
+        await this.prisma.spendEntry.update({
+          where: { segmentId_attempt: { segmentId: entry.segmentId, attempt: entry.attempt } },
+          data: { dispatchedAt: new Date() },
+        });
+      } catch (error) {
+        // 요청은 DB에 확정됐다. 큐 ACK 유실도 같은 jobId로 재전달하므로 중복 과금하지 않는다.
+        childLogger({ traceId }).warn({ err: String(error), jobId }, '생성 큐 인계를 복구 대상으로 남긴다');
+      }
+      submitted.push({ segmentId: entry.segmentId, jobId, attempt: entry.attempt });
     }
 
     await this.audit.record({
@@ -178,8 +164,8 @@ export class GenerationService {
   }
 
   /** 자동 선택(PENDING·FAILED)과 지정 선택을 한 곳에서 처리한다 — 견적과 실행이 같은 집합을 봐야 한다 */
-  private selectSegments(projectId: string, segmentIds?: string[]) {
-    return this.prisma.segment.findMany({
+  private selectSegments(projectId: string, segmentIds?: string[], db: Prisma.TransactionClient = this.prisma) {
+    return db.segment.findMany({
       where: {
         projectId,
         ...(segmentIds?.length ? { id: { in: segmentIds } } : { status: { in: ['PENDING', 'FAILED'] } }),
@@ -200,11 +186,12 @@ export class GenerationService {
     project: { config: unknown },
     segments: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number }>,
     modelHint?: string,
+    db: Prisma.TransactionClient = this.prisma,
   ) {
     const config = project.config as { preferredModel?: string; requiredMode?: string };
     const pinned = modelHint ?? config.preferredModel;
 
-    const models = await this.prisma.aiModel.findMany({
+    const models = await db.aiModel.findMany({
       where: { status: 'ACTIVE', ...(pinned ? { code: pinned } : {}) },
       select: { code: true, costPerSecond: true, capabilities: true },
     });
@@ -233,13 +220,21 @@ export class GenerationService {
       segments.map((s) => ({ segmentId: s.id, segmentIndex: s.segmentIndex, durationMs: s.endMs - s.startMs })),
       candidates.map((m) => ({
         code: m.code,
-        costPerSecond: Number(m.costPerSecond ?? 0),
+        costPerSecond: m.code.startsWith('mock') || (m.capabilities as { billable?: boolean } | null)?.billable === false
+          ? 0 : Number(m.costPerSecond ?? 0),
         // 제공자가 고정 길이만 받으면 과금 길이가 구간 길이와 다르다 — 4초 구간이 5초로 올라간다
         durations: (m.capabilities as { durations?: number[] } | null)?.durations ?? null,
       })),
       MAX_GENERATION_ATTEMPT,
     );
     return { ...estimate, models: candidates.map((m) => m.code), pinnedModel: pinned ?? null };
+  }
+
+  /** 수동 재생성도 큐를 바꾸기 전에 한도를 알려준다. 최종 판정은 모든 경로의 워커가 공유한다. */
+  async assertRegenerationBudget(user: AuthUser, project: { config: unknown },
+    segment: { id: string; segmentIndex: number; startMs: number; endMs: number }) {
+    const cost = await this.estimateCost(project, [segment]);
+    if (!cost.free) await this.spend.assertWithinBudget(user.orgId, cost.max);
   }
 
   /** §6.3 POST /projects/{id}/cancel */
@@ -258,6 +253,12 @@ export class GenerationService {
       select: { id: true, segmentId: true, providerJobId: true },
     });
 
+    await this.prisma.$transaction(async (tx) => {
+      await lockOrganizationSpend(tx, user.orgId);
+      // 제출된 비용은 제공자 환불을 확인하기 전까지 보존한다.
+      await tx.spendEntry.updateMany({ where: { orgId: user.orgId, projectId, status: 'RESERVED' },
+        data: { status: 'RELEASED' } });
+    });
     const removed = await this.queue.cancelByProject(projectId);
     const { count } = await this.prisma.generationJob.updateMany({
       where: { status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] }, segment: { projectId } },

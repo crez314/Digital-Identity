@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@crez/db';
-import { getProfileCentroids } from '@crez/db';
+import { getProfileCentroids, getSourceTrackCentroids } from '@crez/db';
 import { judgeAssignments } from '@crez/engine';
 import {
   CrezError, ErrorCode, QUEUE, logger, storageKey, TRACK_CENTROID_TOP_K,
@@ -317,11 +317,7 @@ export class ProjectService {
     if (sv.tracks.length > 0 && cast.length > 0) {
       const centroids = await getProfileCentroids(cast.map((c) => c.profileId));
       const byProfile = new Map(centroids.map((c) => [c.id, c]));
-      const trackCentroids = await this.prisma.$queryRawUnsafe<Array<{ id: string; track_index: number; face: string | null; quality: string | null }>>(
-        `SELECT id, track_index, face_centroid::text AS face, quality::text AS quality
-         FROM source_track WHERE source_video_id = $1::uuid ORDER BY track_index`,
-        sourceVideoId,
-      );
+      const trackCentroids = await getSourceTrackCentroids(sourceVideoId);
 
       const references = cast
         .map((c) => ({ identityId: c.identityId, centroid: byProfile.get(c.profileId)?.faceCentroid ?? null }))
@@ -330,10 +326,10 @@ export class ProjectService {
       if (references.length > 0) {
         const tracks = trackCentroids
           .map((t) => ({
-            trackIndex: t.track_index,
-            faceCentroid: t.face ? t.face.replace(/^\[|\]$/g, '').split(',').map(Number) : null,
+            trackIndex: t.trackIndex,
+            faceCentroid: t.faceCentroid,
             bodyCentroid: null,
-            quality: t.quality ? Number(t.quality) : 0.5,
+            quality: t.quality ?? 0.5,
           }))
           .filter((t) => t.faceCentroid !== null);
 

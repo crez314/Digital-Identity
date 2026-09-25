@@ -111,6 +111,20 @@ export async function getProfileCentroids(
   }));
 }
 
+/** source_track의 암호문도 프로파일과 같은 경로로 복호화한다. */
+export async function getSourceTrackCentroids(sourceVideoId: string) {
+  const rows = await prisma.$queryRaw<Array<{
+    id: string; track_index: number; face: Buffer | null; quality: string | null;
+  }>>`
+    SELECT id, track_index, face_centroid_enc AS face, quality::text AS quality
+    FROM source_track WHERE source_video_id = ${sourceVideoId}::uuid ORDER BY track_index`;
+  return rows.map((r) => ({
+    id: r.id, trackIndex: r.track_index,
+    faceCentroid: r.face ? decryptVector(r.face, 'source_track.face_centroid', r.id) : null,
+    quality: r.quality === null ? null : Number(r.quality),
+  }));
+}
+
 export async function setSourceTrackCentroid(trackId: string, centroid: number[] | null): Promise<void> {
   if (centroid) assertDim(centroid, FACE_EMBEDDING_DIM, 'source track face centroid');
   const enc = centroid ? encryptVector(centroid, 'source_track.face_centroid', trackId) : null;

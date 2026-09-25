@@ -1,6 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { PrismaClient } from '@crez/db';
-import { CrezError, ErrorCode, snapDuration } from '@crez/shared';
+import { lockOrganizationSpend, readSpendCredits, readSpendPolicy, requireBudget, type PrismaClient } from '@crez/db';
 import { checkBudget, monthStart, type BudgetVerdict, type SpendPolicy } from '@crez/engine';
 import { PRISMA } from '../../common/prisma.module';
 import { AuditService } from '../../common/audit/audit.service';
@@ -19,55 +18,14 @@ export class SpendService {
     private readonly audit: AuditService,
   ) {}
 
-  /** 설정이 없으면 "상한 없음 + 단가 없음"으로 본다 — 그 경우 유료 생성은 막힌다 */
-  async policyOf(orgId: string): Promise<SpendPolicy> {
-    const row = await this.prisma.spendPolicy.findUnique({ where: { orgId } });
-    return {
-      monthlyBudgetKrw: row?.monthlyBudgetKrw ? Number(row.monthlyBudgetKrw) : null,
-      creditUnitPriceKrw: row?.creditUnitPriceKrw ? Number(row.creditUnitPriceKrw) : null,
-      blockWhenUnpriced: row?.blockWhenUnpriced ?? true,
-    };
+  /** 미설정 조직의 기본 월 한도는 30만원. 단가 미설정 시 유료 생성은 차단한다. */
+  policyOf(orgId: string): Promise<SpendPolicy> {
+    return readSpendPolicy(this.prisma, orgId);
   }
 
-  /**
-   * 이번 달 사용량(크레딧).
-   *
-   * 확정된 비용(cost_amount)만 세면 방금 제출한 수십 건이 아직 0으로 잡혀, 연달아 실행할 때
-   * 한도를 두 번 통과한다. 그래서 진행 중인 작업은 예상 비용으로 함께 센다.
-   *
-   * 다만 이 값이 제공자 청구서와 같다는 보장은 없다 — 실패했는데 과금되는 경우와
-   * 진행 중 취소가 거부된 경우는 여기에 잡히지 않는다(§12.1).
-   */
-  async monthToDateCredits(orgId: string, now = new Date()): Promise<number> {
-    const since = monthStart(now);
-    const jobs = await this.prisma.generationJob.findMany({
-      where: {
-        createdAt: { gte: since },
-        segment: { project: { orgId } },
-      },
-      select: {
-        status: true, costAmount: true,
-        model: { select: { costPerSecond: true, capabilities: true } },
-        segment: { select: { startMs: true, endMs: true } },
-      },
-    });
-
-    let total = 0;
-    for (const j of jobs) {
-      const billable = (j.model.capabilities as { billable?: boolean } | null)?.billable === true;
-      if (!billable) continue;
-
-      if (j.costAmount !== null) {
-        total += Number(j.costAmount);
-        continue;
-      }
-      // 아직 끝나지 않은 작업은 예상 비용으로 센다. 끝난 작업인데 비용이 없으면 과금되지 않은 것으로 본다.
-      if (!['QUEUED', 'SUBMITTED', 'RUNNING'].includes(j.status)) continue;
-      const seconds = Math.max(0, j.segment.endMs - j.segment.startMs) / 1000;
-      const durations = (j.model.capabilities as { durations?: number[] } | null)?.durations ?? null;
-      total += snapDuration(durations, seconds) * Number(j.model.costPerSecond ?? 0);
-    }
-    return Number(total.toFixed(4));
+  /** 프로젝트가 삭제되어도 독립 원장의 예약·제출·확정 비용을 센다. */
+  monthToDateCredits(orgId: string, now = new Date()): Promise<number> {
+    return readSpendCredits(this.prisma, orgId, now);
   }
 
   /** 지출 정책과 이번 달 사용 현황 */
@@ -91,11 +49,15 @@ export class SpendService {
     input: { monthlyBudgetKrw?: number | null; creditUnitPriceKrw?: number | null; blockWhenUnpriced?: boolean },
     traceId: string,
   ) {
-    const before = await this.policyOf(user.orgId);
-    const row = await this.prisma.spendPolicy.upsert({
-      where: { orgId: user.orgId },
-      update: { ...input, updatedBy: user.id },
-      create: { orgId: user.orgId, ...input, updatedBy: user.id },
+    const { before, row } = await this.prisma.$transaction(async (tx) => {
+      await lockOrganizationSpend(tx, user.orgId);
+      const before = await readSpendPolicy(tx, user.orgId);
+      const row = await tx.spendPolicy.upsert({
+        where: { orgId: user.orgId },
+        update: { ...input, updatedBy: user.id },
+        create: { orgId: user.orgId, ...input, updatedBy: user.id },
+      });
+      return { before, row };
     });
 
     // 한도를 바꾸는 일은 돈에 직접 닿는 결정이라 반드시 남긴다(§14.2)
@@ -105,8 +67,8 @@ export class SpendService {
       traceId,
     });
     return {
-      monthlyBudgetKrw: row.monthlyBudgetKrw ? Number(row.monthlyBudgetKrw) : null,
-      creditUnitPriceKrw: row.creditUnitPriceKrw ? Number(row.creditUnitPriceKrw) : null,
+      monthlyBudgetKrw: row.monthlyBudgetKrw === null ? null : Number(row.monthlyBudgetKrw),
+      creditUnitPriceKrw: row.creditUnitPriceKrw === null ? null : Number(row.creditUnitPriceKrw),
       blockWhenUnpriced: row.blockWhenUnpriced,
     };
   }
@@ -118,15 +80,6 @@ export class SpendService {
   async assertWithinBudget(orgId: string, estimateCredits: number): Promise<BudgetVerdict> {
     const policy = await this.policyOf(orgId);
     const monthToDateCredits = await this.monthToDateCredits(orgId);
-    const verdict = checkBudget({ policy, monthToDateCredits, estimateCredits });
-    if (!verdict.allowed) {
-      throw new CrezError(
-        ErrorCode.PRJ_INVALID_STATE,
-        verdict.message ?? '지출 한도로 생성을 진행할 수 없습니다',
-        { budget: verdict, monthToDateCredits, estimateCredits },
-        409,
-      );
-    }
-    return verdict;
+    return requireBudget(policy, monthToDateCredits, estimateCredits);
   }
 }

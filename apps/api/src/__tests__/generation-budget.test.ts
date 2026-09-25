@@ -8,22 +8,9 @@ import { SpendService } from '../modules/spend/spend.service';
  */
 const user = { id: 'u1', orgId: 'org1' } as never;
 
-const KLING = { costPerSecond: 0.25, capabilities: { billable: true, durations: [5, 10] } };
-const MOCK = { costPerSecond: 0.02, capabilities: { modes: ['i2v'] } };
-
-function job(over: Partial<{ status: string; costAmount: number | null; model: unknown; durationMs: number }> = {}) {
-  const durationMs = over.durationMs ?? 5000;
-  return {
-    status: over.status ?? 'SUCCEEDED',
-    costAmount: over.costAmount === undefined ? 1.25 : over.costAmount,
-    model: over.model ?? KLING,
-    segment: { startMs: 0, endMs: durationMs },
-  };
-}
-
 function setup(opts: {
   policy?: { monthlyBudgetKrw?: number | null; creditUnitPriceKrw?: number | null; blockWhenUnpriced?: boolean } | null;
-  jobs?: ReturnType<typeof job>[];
+  credits?: number;
 } = {}) {
   const prisma = {
     spendPolicy: {
@@ -39,54 +26,44 @@ function setup(opts: {
         monthlyBudgetKrw: 100_000, creditUnitPriceKrw: 250, blockWhenUnpriced: true,
       }),
     },
-    generationJob: { findMany: vi.fn().mockResolvedValue(opts.jobs ?? []) },
+    spendEntry: { aggregate: vi.fn().mockResolvedValue({ _sum: { amountCredits: opts.credits ?? 0 } }) },
+    $executeRaw: vi.fn(),
   };
+  Object.assign(prisma, { $transaction: vi.fn((fn: (tx: typeof prisma) => unknown) => fn(prisma)) });
   const audit = { record: vi.fn() };
   return { svc: new SpendService(prisma as never, audit as never), prisma, audit };
 }
 
-describe('이번 달 사용량 집계', () => {
-  it('확정된 비용을 더한다', async () => {
-    const { svc } = setup({ jobs: [job(), job(), job()] });
-    expect(await svc.monthToDateCredits('org1')).toBe(3.75);
+describe('기본 월 한도', () => {
+  it('설정이 없는 조직은 30만원으로 시작한다', async () => {
+    const { svc } = setup({ policy: null });
+    expect((await svc.policyOf('org1')).monthlyBudgetKrw).toBe(300000);
   });
-
-  it('진행 중인 작업은 예상 비용으로 센다 — 안 그러면 연달아 실행할 때 한도를 두 번 통과한다', async () => {
-    const { svc } = setup({ jobs: [job({ status: 'SUBMITTED', costAmount: null })] });
-    expect(await svc.monthToDateCredits('org1')).toBe(1.25);
+  it('명시적인 0원은 무제한으로 바꾸지 않는다', async () => {
+    const { svc } = setup({ policy: { monthlyBudgetKrw: 0 } });
+    await expect(svc.assertWithinBudget('org1', 1)).rejects.toThrow(CrezError);
   });
-
-  it('진행 중 예상 비용도 제공자 길이로 계산한다 — 4초 구간은 5초로 올라간다', async () => {
-    const { svc } = setup({ jobs: [job({ status: 'RUNNING', costAmount: null, durationMs: 4000 })] });
-    expect(await svc.monthToDateCredits('org1')).toBe(1.25);
-  });
-
-  it('무료 모델은 세지 않는다', async () => {
-    const { svc } = setup({ jobs: [job({ model: MOCK, costAmount: 0.1 })] });
-    expect(await svc.monthToDateCredits('org1')).toBe(0);
-  });
-
-  it('끝났는데 비용이 없으면 과금되지 않은 것으로 본다', async () => {
-    const { svc } = setup({ jobs: [job({ status: 'FAILED', costAmount: null })] });
-    expect(await svc.monthToDateCredits('org1')).toBe(0);
+  it('명시적인 무제한 설정은 보존한다', async () => {
+    const { svc } = setup({ policy: { monthlyBudgetKrw: null } });
+    expect((await svc.policyOf('org1')).monthlyBudgetKrw).toBeNull();
   });
 });
 
 describe('한도 검사', () => {
   it('한도 안이면 통과한다', async () => {
-    const { svc } = setup({ jobs: [job()] });   // 1.25크레딧 = 313원
+    const { svc } = setup({ credits: 1.25 });   // 1.25크레딧 = 313원
     const v = await svc.assertWithinBudget('org1', 15);
     expect(v.allowed).toBe(true);
     expect(v.remainingKrw).toBe(99_687);
   });
 
   it('이번 실행까지 더해 한도를 넘으면 막는다', async () => {
-    const { svc } = setup({ jobs: Array.from({ length: 300 }, () => job()) });  // 375크레딧 = 93,750원
+    const { svc } = setup({ credits: 375 });  // 375크레딧 = 93,750원
     await expect(svc.assertWithinBudget('org1', 100)).rejects.toThrow(CrezError);
   });
 
   it('막을 때 남은 한도를 알려준다', async () => {
-    const { svc } = setup({ jobs: Array.from({ length: 300 }, () => job()) });
+    const { svc } = setup({ credits: 375 });
     await svc.assertWithinBudget('org1', 100).then(
       () => { throw new Error('막아야 한다'); },
       (e: CrezError) => {

@@ -12,6 +12,7 @@
     "dev": "turbo run dev --parallel",
     "lint": "turbo run lint",
     "test": "turbo run test",
+    "test:integration": "vitest run --config tests/vitest.integration.config.ts",
     "typecheck": "turbo run typecheck",
     "db:generate": "pnpm --filter @crez/db exec prisma generate",
     "db:migrate": "pnpm --filter @crez/db exec prisma migrate dev",

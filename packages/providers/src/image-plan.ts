@@ -22,7 +22,11 @@ const kindOrder = (kind: string): number => KIND_ORDER[kind] ?? Number.MAX_SAFE_
  * 한도 때문에 빠진 참고 이미지는 droppedReferenceIds로 돌려준다 — 조용히 사라지면
  * "첨부했는데 반영이 안 됐다"를 설명할 방법이 없다.
  */
-export function planImages(req: GenerationRequest, max: number): ImagePlan {
+export function planImages(
+  req: GenerationRequest,
+  max: number,
+  opts: { perIdentity?: number } = {},
+): ImagePlan {
   const cast = [...req.cast].sort((a, b) => a.slotIndex - b.slotIndex);
   const faces = cast.map((c) =>
     c.references
@@ -61,7 +65,10 @@ export function planImages(req: GenerationRequest, max: number): ImagePlan {
   // URL을 만들지 못한 첨부도 전달되지 않았다
   for (const a of req.attachments) if (!a.signedUrl) droppedReferenceIds.push(a.referenceId);
 
-  for (let round = 1; room(); round++) {
+  // 인물당 장수 상한. 제공자가 이 URL들을 전부 내려받아야 해서, 상한이 없으면 4명 × 7~8장 = 29장이
+  // 한 요청에 실려 제공자 쪽 다운로드가 길어지고 생성이 실패한다(2026-09-25 seedance 2.5 실측).
+  const perIdentity = opts.perIdentity ?? Number.MAX_SAFE_INTEGER;
+  for (let round = 1; round < perIdentity && room(); round++) {
     let added = false;
     for (const list of faces) {
       if (list[round] && room()) {

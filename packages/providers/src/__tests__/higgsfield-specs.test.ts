@@ -129,11 +129,27 @@ describe('Higgsfield 모드별 요청 규격 — 공개 input_schema 계약', ()
 });
 
 describe('Higgsfield 새 모델 — 요청 본문', () => {
-  it('seedance 2.5 reference는 레퍼런스를 스펙 상한 30장까지 넣고 오디오를 끈다', async () => {
+  it('seedance 2.5 reference는 인물당 2장만 넣고 오디오를 끈다', async () => {
     const body = await submittedBody('/bytedance/seedance-2.5/reference-to-video');
-    expect(body.image_urls).toHaveLength(30);
+    // 사진이 40장 있어도 2장이다 — 제공자가 URL을 전부 내려받아야 해서 장수가 많으면 생성이 실패한다
+    expect(body.image_urls).toHaveLength(2);
     expect(body).toMatchObject({ duration: 6, resolution: '720p', aspect_ratio: '16:9', generate_audio: false });
     expect(body.image_url).toBeUndefined();
+  });
+
+  it('여러 명이면 인물마다 2장씩 들어간다 — 한 사람이 자리를 다 차지하지 않는다', async () => {
+    const cast = ['a', 'b', 'c', 'd'].map((id, slotIndex) => ({
+      identityId: `id-${id}`, profileId: `p-${id}`, slotIndex, appearance: {},
+      references: Array.from({ length: 8 }, (_, i) => ref(`id-${id}`, i)),
+    }));
+    const body = await submittedBody('/bytedance/seedance-2.5/reference-to-video', { cast });
+    const urls = body.image_urls as string[];
+    expect(urls).toHaveLength(8);
+    for (const id of ['a', 'b', 'c', 'd']) {
+      expect(urls.filter((u) => u.includes(`id-${id}-`))).toHaveLength(2);
+    }
+    // 대표 사진(품질 1위)이 인물마다 먼저 들어간다
+    expect(urls.slice(0, 4)).toEqual(['a', 'b', 'c', 'd'].map((id) => `https://s3/id-${id}-0.jpg`));
   });
 
   it('seedance 2.5는 720p가 최대라 1080 요청도 720p로 보낸다', async () => {
@@ -150,7 +166,7 @@ describe('Higgsfield 새 모델 — 요청 본문', () => {
   it('minimax h3는 해상도가 2K 하나뿐이고 5초 미만은 5초로 올린다', async () => {
     const body = await submittedBody('/minimax/h3/reference-to-video', { durationMs: 3000 });
     expect(body).toMatchObject({ resolution: '2K', duration: 5 });
-    expect(body.image_urls).toHaveLength(9);
+    expect(body.image_urls).toHaveLength(2);
   });
 
   it('hailuo 2.3은 제공자 프롬프트 재작성을 끈다 — 신원 고정 문구가 사라지지 않게', async () => {

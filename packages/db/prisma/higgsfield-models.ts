@@ -24,6 +24,15 @@ interface HiggsfieldModel {
   endpoint: string;
   /** CREZ 생성 모드. reference = 인물 레퍼런스 여러 장으로 신원을 조건화 */
   mode: 'i2v' | 'reference';
+  /**
+   * 한 구간에 세울 수 있는 인물 수. 라우터가 캐스트 수와 비교해 모델을 거른다.
+   *
+   * 제공자가 공개하는 값이 아니다 — ByteDance·Higgsfield 문서 어디에도 인물 수 상한은 없고
+   * 레퍼런스 장수 상한(이미지 30장 + 영상 10 + 오디오 10)만 있다. 그래서 장수로 감당되는 범위에서
+   * 실제로 써 본 만큼만 올린다. 2026-09-25 현재 레퍼런스 4명까지 열어 두었고, 인물이 늘수록
+   * 얼굴이 섞일 수 있으므로 QC 점수로 확인한 뒤 더 올린다.
+   * i2v는 시작 이미지가 한 장이라 구조상 1명이다.
+   */
   maxPersons: number;
   maxResolution: number;
   costPerSecond: number;
@@ -58,9 +67,9 @@ export const HIGGSFIELD_MODELS: readonly HiggsfieldModel[] = [
   { code: 'higgsfield-hailuo23-i2v', endpoint: '/minimax/hailuo-2.3/standard/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 720, costPerSecond: 0.056, pricingSource: CATALOG, active: true },
 
   // ── 열림: 인물 레퍼런스 여러 장 (reference) — Identity conditioning 경로 ──
-  { code: 'higgsfield-seedance25-reference', endpoint: '/bytedance/seedance-2.5/reference-to-video', mode: 'reference', maxPersons: 3, maxResolution: 720, costPerSecond: 0.2057, pricingSource: CATALOG, active: true },
-  { code: 'higgsfield-seedance20-reference', endpoint: '/bytedance/seedance-2.0/reference-to-video', mode: 'reference', maxPersons: 3, maxResolution: 2160, costPerSecond: 0.1407, pricingSource: CATALOG, active: true },
-  { code: 'higgsfield-minimax-h3-reference', endpoint: '/minimax/h3/reference-to-video', mode: 'reference', maxPersons: 3, maxResolution: 1440, costPerSecond: 0.13, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance25-reference', endpoint: '/bytedance/seedance-2.5/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 720, costPerSecond: 0.2057, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance20-reference', endpoint: '/bytedance/seedance-2.0/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 2160, costPerSecond: 0.1407, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-minimax-h3-reference', endpoint: '/minimax/h3/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 1440, costPerSecond: 0.13, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling-o3-reference', endpoint: '/kling-video/o3/image-reference', mode: 'reference', maxPersons: 3, maxResolution: 720, costPerSecond: 0.084, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling-omni-reference', endpoint: '/kling-video/omni/image-reference', mode: 'reference', maxPersons: 3, maxResolution: 1080, costPerSecond: 0.112, pricingSource: CATALOG, active: true },
 ];

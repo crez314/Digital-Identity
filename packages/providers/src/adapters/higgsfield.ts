@@ -90,7 +90,7 @@ export function classifyHiggsfieldError(detail: string): ErrorCodeValue {
  */
 export interface EndpointSpec {
   /** image_url: 시작 이미지 1장. image_urls: 인물 레퍼런스 여러 장(max까지) */
-  images: { field: 'image_url' } | { field: 'image_urls'; max: number };
+  images: { field: 'image_url' } | { field: 'image_urls'; max: number; perIdentity?: number };
   durationType: 'integer' | 'string';
   /** [세로 픽셀, 스펙 표기] 오름차순. 요청 높이 이상인 가장 작은 값을 쓴다. 없으면 해상도를 보내지 않는다 */
   resolutions?: ReadonlyArray<readonly [number, string]>;
@@ -150,11 +150,11 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
   '/kling-video/v3.0-turbo/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: P_RES },
   // 레퍼런스 장수 상한이 스키마에 없다 — 모르는 상한을 넘겨 400을 받지 않도록 보수적으로 4장
   '/kling-video/o3/image-reference': {
-    images: { field: 'image_urls', max: 4 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
+    images: { field: 'image_urls', max: 4, perIdentity: 2 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
     fixed: { sound: 'off' },
   },
   '/kling-video/omni/image-reference': {
-    images: { field: 'image_urls', max: 4 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
+    images: { field: 'image_urls', max: 4, perIdentity: 2 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
   },
 
   '/bytedance/seedance-2.5/image-to-video': {
@@ -162,7 +162,7 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
     fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.5/reference-to-video': {
-    images: { field: 'image_urls', max: 30 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
+    images: { field: 'image_urls', max: 30, perIdentity: 2 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
     aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.0/image-to-video': {
@@ -170,14 +170,14 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
     fixed: { generate_audio: false },
   },
   '/bytedance/seedance-2.0/reference-to-video': {
-    images: { field: 'image_urls', max: 9 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
+    images: { field: 'image_urls', max: 9, perIdentity: 2 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
     aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
   },
 
   // H3는 해상도가 '2K' 하나뿐이다
   '/minimax/h3/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: [[1440, '2K']] },
   '/minimax/h3/reference-to-video': {
-    images: { field: 'image_urls', max: 9 }, durationType: 'integer', resolutions: [[1440, '2K']],
+    images: { field: 'image_urls', max: 9, perIdentity: 2 }, durationType: 'integer', resolutions: [[1440, '2K']],
     aspectRatios: H3_RATIOS,
   },
   // prompt_optimizer는 제공자가 프롬프트를 고쳐 쓴다 — CREZ가 넣은 신원 고정 문구가 사라질 수 있어 끈다
@@ -282,7 +282,8 @@ export class HiggsfieldProvider implements GenerationProvider {
    */
   planImages(req: GenerationRequest): ImagePlan {
     const { images } = specFor(this.cfg.endpoint);
-    return planImages(req, images.field === 'image_urls' ? images.max : 1);
+    if (images.field !== 'image_urls') return planImages(req, 1);
+    return planImages(req, images.max, { perIdentity: images.perIdentity });
   }
 
   /** 신원 레퍼런스 없이 참고 이미지만으로 제출하면 인물이 보장되지 않으므로 거절한다 */

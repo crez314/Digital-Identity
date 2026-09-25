@@ -21,6 +21,7 @@ import { finalizeGeneration } from '../lib/generation-finalize';
 import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
 import { presignReference } from '../lib/reference-image';
+import { assertReferenceOriginsReachable } from '../lib/reference-origin';
 import {
   buildChainStartFrame, CHAIN_ASSET_PREFIX, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
 } from '../lib/chain-start';
@@ -399,17 +400,15 @@ async function submit(data: GenerationJobPayload) {
   // 제공자마다 받을 수 있는 이미지 수가 다르다. 실제로 넘긴 이미지와 빠진 첨부를 기록한다(URL은 만료되므로 제외).
   const imagePlan = provider.planImages(request);
 
-  // 외부 제공자는 공개 URL로만 이미지를 받아간다(§12.1). 로컬 주소를 그대로 보내면 제공자 쪽에서
-  // "Generation failed"로 끝나면서 시도 횟수와 크레딧만 사라진다 — 보내기 전에 막는다.
-  const localImage = imagePlan.images.find((i) => isLocalUrl(i.url));
-  if (localImage && !decision.model.code.startsWith('mock')) {
-    await failRouting(segment.id, project.id, data, new CrezError(
-      ErrorCode.GEN_PROVIDER_ERROR,
-      '레퍼런스 이미지 주소가 외부에서 열리지 않습니다 — S3_PUBLIC_ENDPOINT를 공개 주소로 설정한 뒤 다시 실행하세요',
-      { host: hostOf(localImage.url), model: decision.model.code },
-      422,
-    ));
-    return { failed: true, code: ErrorCode.GEN_PROVIDER_ERROR };
+  // 로컬 주소뿐 아니라 끊긴 공개 터널도 제출·비용 확정 전에 잡는다.
+  if (!decision.model.code.startsWith('mock')) {
+    try {
+      await assertReferenceOriginsReachable(imagePlan.images.map((i) => i.url));
+    } catch (error) {
+      if (!(error instanceof CrezError)) throw error;
+      await failRouting(segment.id, project.id, data, error);
+      return { failed: true, code: error.code };
+    }
   }
 
   let created;
@@ -722,16 +721,6 @@ async function failRouting(
     traceId: data.traceId,
   });
   childLogger({ traceId: data.traceId, segmentId }).warn({ code: err.code, ...detail }, 'generation routing failed');
-}
-
-/** 제공자가 받아갈 수 없는 주소인지 — 로컬 개발 주소로 제출하면 생성이 실패한다 (§12.1) */
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', 'minio', 'host.docker.internal']);
-function hostOf(url: string): string {
-  try { return new URL(url).hostname; } catch { return url.slice(0, 40); }
-}
-function isLocalUrl(url: string): boolean {
-  const host = hostOf(url);
-  return LOCAL_HOSTS.has(host) || host.endsWith('.local') || host.endsWith('.internal');
 }
 
 interface CancelJob {

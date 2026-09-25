@@ -182,6 +182,41 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     expect((await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } })).status).toBe('FAILED');
   });
 
+  it('공개 주소 장애는 제공자 제출 없이 예약·횟수를 되돌리고 복구 후 다시 생성할 수 있다', async () => {
+    const fx = await fixture(6000); const p = await fx.project();
+    await generation.generate(fx.user, p.project.id, {}, 'dead-tunnel');
+    const provider = {
+      code: 'fake-paid',
+      planImages: () => ({ images: [{ url: 'https://expired.trycloudflare.com/private/a?signature=secret' }], droppedReferenceIds: [] }),
+      estimateCost: () => 6, submit: vi.fn().mockResolvedValue({ providerJobId: 'after-repair' }),
+    };
+    vi.spyOn(providerRegistry, 'resolve').mockReturnValue(provider as never);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const data = { orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 1, traceId: 'dead-tunnel' };
+    expect(await generationProcessor({ name: JOB_NAME.GENERATION_SUBMIT, data } as never))
+      .toMatchObject({ failed: true, code: 'CREZ-GEN-002' });
+    expect(provider.submit).not.toHaveBeenCalled();
+    expect(await prisma.generationJob.count({ where: { segmentId: p.segment.id } })).toBe(0);
+    expect(await readSpendCredits(prisma, fx.org.id)).toBe(0);
+    expect(await prisma.spendEntry.findUniqueOrThrow({
+      where: { segmentId_attempt: { segmentId: p.segment.id, attempt: 1 } },
+    })).toMatchObject({ status: 'RELEASED' });
+    expect(await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } }))
+      .toMatchObject({ status: 'FAILED', attemptCount: 0 });
+    expect(await prisma.project.findUniqueOrThrow({ where: { id: p.project.id } })).toMatchObject({ status: 'READY' });
+    expect(f.emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'ERROR', payload: expect.objectContaining({ segmentStatus: 'FAILED', detail: expect.objectContaining({ sent: false }) }),
+    }));
+
+    fetch.mockResolvedValue(new Response(null, { status: 403 }));
+    const retry = await generation.generate(fx.user, p.project.id, {}, 'repaired');
+    await generationProcessor({ name: JOB_NAME.GENERATION_SUBMIT,
+      data: { ...data, attempt: retry.submitted[0].attempt, traceId: 'repaired' },
+    } as never);
+    expect(provider.submit).toHaveBeenCalledTimes(1);
+    expect(await readSpendCredits(prisma, fx.org.id)).toBe(6);
+  });
+
   it('이미 예약한 요청은 자기 비용을 이중 합산하지 않고 딱 한 번 제출한다', async () => {
     const fx = await fixture(6000); const p = await fx.project();
     await generation.generate(fx.user, p.project.id, {}, 'one-submit');

@@ -11,6 +11,7 @@ import { ProjectSetup, type SetupConfig } from '@/components/project-setup';
 import { MODE_INFO } from '@/components/generation-settings';
 import { SegmentReferences, type CastOption, type ReferenceRow } from '@/components/segment-references';
 import { SEGMENT_COLORS, ms as fmtMs, score } from '@/lib/format';
+import { RunProgress, type RunError } from '@/components/run-progress';
 
 interface SegmentRow {
   id: string;
@@ -183,10 +184,22 @@ export default function ProjectDetail() {
     queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
     enabled: Boolean(project.data),
   });
+  // 이번 실행으로 큐에 넣은 구간 — 알림이 "무엇이 몇 개 도는지"를 이 기준으로 센다
+  const [run, setRun] = useState<{ ids: string[]; at: string } | null>(null);
+  // 닫으면 이번 실행에 대해서는 다시 뜨지 않는다 — 다음 실행에서 다시 연다
+  const [runDismissed, setRunDismissed] = useState(false);
   const generate = useMutation({
     // 화면에 보여 준 견적을 그대로 상한으로 올려 보낸다 — 본 것과 나가는 것이 같아야 한다
-    mutationFn: () => post(`/projects/${id}/generate`, { maxCost: estimate.data?.max }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['generate-estimate', id] }),
+    mutationFn: () => post<{ submitted: Array<{ segmentId: string }> }>(
+      `/projects/${id}/generate`, { maxCost: estimate.data?.max },
+    ),
+    onSuccess: (res) => {
+      setRun({ ids: res.submitted.map((x) => x.segmentId), at: new Date().toISOString() });
+      setRunDismissed(false);
+      qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
+      qc.invalidateQueries({ queryKey: ['project-segments', id] });
+      qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
+    },
   });
   // 시도 한도를 다 쓴 구간은 재생성 사다리로도 못 되살린다 — 원인을 고친 뒤 되돌리는 경로
   const resetSegment = useMutation({
@@ -213,6 +226,14 @@ export default function ProjectDetail() {
   const config = project.data?.config ?? {};
   // 삭제는 실제로 도는 작업이 있을 때만 막는다(api와 같은 기준)
   const inFlight = (dashboard.data?.counts.GENERATING ?? 0) + (dashboard.data?.counts.QC ?? 0);
+  // 실행 알림 — 이번 실행에 든 구간만 센다. 화면을 새로 열었으면(run 없음) 진행 중인 것만 보여 준다.
+  const runSegments = (segments.data ?? []).filter((s) => !run || run.ids.includes(s.id));
+  const runCount = (...st: string[]) => runSegments.filter((s) => st.includes(s.status)).length;
+  const runErrors: RunError[] = run
+    ? events
+        .filter((e) => e.type === 'ERROR' && e.at >= run.at && (!run.ids.length || !e.segmentId || run.ids.includes(e.segmentId)))
+        .map((e) => ({ code: e.payload.code as string | undefined, message: e.payload.message as string | undefined, at: e.at }))
+    : [];
   // 생성 실행이 실제로 집어가는 구간 — 대기·실패이면서 시도 한도가 남은 것 (api generate와 같은 기준)
   const generatable = (segments.data ?? []).filter(
     (s) => ['PENDING', 'FAILED'].includes(s.status) && s.attemptCount < MAX_ATTEMPT,
@@ -268,6 +289,18 @@ export default function ProjectDetail() {
       ) : null}
 
       <ErrorBox error={generate.error ?? cancel.error ?? master.error ?? remove.error} />
+
+      {runDismissed ? null : (
+      <RunProgress
+        submitted={run ? run.ids.length : null}
+        running={runCount('GENERATING', 'QC')}
+        passed={runCount('PASSED')}
+        review={runCount('MANUAL_REVIEW')}
+        failed={runCount('FAILED')}
+        errors={runErrors}
+        onClose={() => setRunDismissed(true)}
+      />
+      )}
 
       {preparing && cast.data && segments.data ? (
         <ProjectSetup

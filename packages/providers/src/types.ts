@@ -105,6 +105,8 @@ export interface GenerationRequest {
   attachments: PromptAttachment[];
   /** 출력 화면 비율 (project.config.aspectRatio, 기본 16:9). 받지 않는 제공자는 무시하고 경고를 남긴다 */
   aspectRatio: '16:9' | '9:16';
+  /** 제공자가 소리(음악·효과음)를 함께 만들게 할지 — 지원하지 않는 모델에는 전달되지 않는다 */
+  audio?: boolean;
   /** pose-guided 모드용 소스 트랙 키 */
   sourceVideoKey: string | null;
   sourceTracksKey: string | null;

@@ -14,6 +14,11 @@ export const ProjectConfig = z.object({
   /** 출력 화면 비율. 미지정 시 16:9 — 받지 않는 제공자는 시작 이미지 비율을 따른다(§12.1) */
   aspectRatio: AspectRatio.default('16:9'),
   /**
+   * 제공자가 영상과 함께 소리(음악·효과음)를 만들게 할지. 기본 켬.
+   * 끄면 무음 영상이 나온다. 켜면 모델에 따라 초당 단가가 올라갈 수 있어 견적도 그만큼 높게 잡는다.
+   */
+  audio: z.boolean().default(true),
+  /**
    * 이 프로젝트에서 반드시 쓸 모델 code. 지정하면 라우터가 점수로 다른 모델(예: mock)을 고르지 않고,
    * 이 모델이 조건을 못 맞추면 조용히 대체하지 않고 생성이 실패한다. 비우면 점수 기준 자동 선택.
    */
@@ -34,6 +39,7 @@ export const UpdateProjectRequest = z.object({
       requiredMode: GenerationMode.optional(),
       aspectRatio: AspectRatio.optional(),
       resolution: z.enum(['720p', '1080p', '2160p']).optional(),
+      audio: z.boolean().optional(),
       /** null이면 자동 선택으로 되돌린다 */
       preferredModel: z.string().min(1).nullable().optional(),
     })

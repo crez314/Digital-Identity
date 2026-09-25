@@ -36,6 +36,11 @@ interface HiggsfieldModel {
   maxPersons: number;
   maxResolution: number;
   costPerSecond: number;
+  /**
+   * 소리를 켰을 때의 초당 단가(USD). 카탈로그가 가격을 범위로 공시하는 모델만 값이 있다.
+   * 무엇이 상한을 만드는지 제공자가 밝히지 않아, 소리를 켜면 이 상한으로 견적한다(과다 견적 방향).
+   */
+  costPerSecondAudio?: number;
   pricingSource: string;
   active: boolean;
 }
@@ -61,14 +66,14 @@ export const HIGGSFIELD_MODELS: readonly HiggsfieldModel[] = [
   { code: 'higgsfield-kling30-pro-i2v', endpoint: '/kling-video/v3.0/pro/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 1080, costPerSecond: 0.168, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling30-4k-i2v', endpoint: '/kling-video/v3.0/4k/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 2160, costPerSecond: 0.42, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling30-turbo-i2v', endpoint: '/kling-video/v3.0-turbo/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 1080, costPerSecond: 0.14, pricingSource: CATALOG, active: true },
-  { code: 'higgsfield-seedance25-i2v', endpoint: '/bytedance/seedance-2.5/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 720, costPerSecond: 0.2057, pricingSource: CATALOG, active: true },
-  { code: 'higgsfield-seedance20-i2v', endpoint: '/bytedance/seedance-2.0/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 2160, costPerSecond: 0.1407, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance25-i2v', endpoint: '/bytedance/seedance-2.5/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 720, costPerSecond: 0.2057, costPerSecondAudio: 0.4623, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance20-i2v', endpoint: '/bytedance/seedance-2.0/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 2160, costPerSecond: 0.1407, costPerSecondAudio: 0.4623, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-minimax-h3-i2v', endpoint: '/minimax/h3/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 1440, costPerSecond: 0.13, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-hailuo23-i2v', endpoint: '/minimax/hailuo-2.3/standard/image-to-video', mode: 'i2v', maxPersons: 1, maxResolution: 720, costPerSecond: 0.056, pricingSource: CATALOG, active: true },
 
   // ── 열림: 인물 레퍼런스 여러 장 (reference) — Identity conditioning 경로 ──
-  { code: 'higgsfield-seedance25-reference', endpoint: '/bytedance/seedance-2.5/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 720, costPerSecond: 0.2057, pricingSource: CATALOG, active: true },
-  { code: 'higgsfield-seedance20-reference', endpoint: '/bytedance/seedance-2.0/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 2160, costPerSecond: 0.1407, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance25-reference', endpoint: '/bytedance/seedance-2.5/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 720, costPerSecond: 0.2057, costPerSecondAudio: 0.4623, pricingSource: CATALOG, active: true },
+  { code: 'higgsfield-seedance20-reference', endpoint: '/bytedance/seedance-2.0/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 2160, costPerSecond: 0.1407, costPerSecondAudio: 0.4623, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-minimax-h3-reference', endpoint: '/minimax/h3/reference-to-video', mode: 'reference', maxPersons: 4, maxResolution: 1440, costPerSecond: 0.13, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling-o3-reference', endpoint: '/kling-video/o3/image-reference', mode: 'reference', maxPersons: 3, maxResolution: 720, costPerSecond: 0.084, pricingSource: CATALOG, active: true },
   { code: 'higgsfield-kling-omni-reference', endpoint: '/kling-video/omni/image-reference', mode: 'reference', maxPersons: 3, maxResolution: 1080, costPerSecond: 0.112, pricingSource: CATALOG, active: true },
@@ -81,6 +86,7 @@ export async function syncHiggsfieldModels(prisma: PrismaClient): Promise<{ acti
     if (!durations) throw new Error(`${m.code}: ${m.endpoint}의 허용 길이가 HIGGSFIELD_DURATIONS에 없다`);
     const capabilities = {
       modes: [m.mode], maxPersons: m.maxPersons, maxResolution: m.maxResolution,
+      ...(m.costPerSecondAudio ? { costPerSecondAudio: m.costPerSecondAudio } : {}),
       maxDurationMs: Math.max(...durations) * 1000, durations: [...durations],
       billable: true, endpoint: m.endpoint, pricingSource: m.pricingSource,
     };

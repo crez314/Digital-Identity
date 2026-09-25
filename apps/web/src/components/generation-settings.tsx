@@ -10,6 +10,8 @@ export interface GenerationSettings {
   aspectRatio: string;
   /** null이면 점수 기준 자동 선택 */
   preferredModel: string | null;
+  /** 제공자가 소리(음악·효과음)를 함께 만들게 할지 */
+  audio: boolean;
 }
 
 /** 화면 비율을 지정할 수 있는 제공자 — kling은 시작 이미지 비율을 따른다(§12.1) */
@@ -124,6 +126,19 @@ export function GenerationSettingsFields({
           <select aria-label="해상도" value={value.resolution} disabled={disabled} onChange={(e) => onChange({ ...value, resolution: e.target.value })} className={selectCls}>
             <option value="720p">720p</option>
             <option value="1080p">1080p</option>
+          </select>
+        </label>
+        <label className="text-xs text-neutral-500">
+          소리
+          <select
+            aria-label="소리"
+            value={value.audio === false ? 'off' : 'on'}
+            disabled={disabled}
+            onChange={(e) => onChange({ ...value, audio: e.target.value === 'on' })}
+            className={selectCls}
+          >
+            <option value="on">음악·소리 함께 생성</option>
+            <option value="off">무음</option>
           </select>
         </label>
         <label className="text-xs text-neutral-500">

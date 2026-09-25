@@ -34,8 +34,10 @@ model Organization {
 /// 그래서 한도는 사후 정산이 아니라 제출 전에 건다.
 model SpendPolicy {
   orgId              String   @id @map("org_id") @db.Uuid
-  /// 월 상한(원). null이면 금액 상한 없음
+  /// 월 상한(원) — 실패한 생성은 빼고 센다(실제로 나갈 돈). null이면 금액 상한 없음
   monthlyBudgetKrw   Decimal? @default(300000) @map("monthly_budget_krw") @db.Decimal(14, 2)
+  /// 월 상한(원) — 실패한 생성까지 포함해 센다. 실패가 쏟아지는 상황을 잡는 천장
+  monthlyGrossBudgetKrw Decimal? @default(500000) @map("monthly_gross_budget_krw") @db.Decimal(14, 2)
   /// 1 크레딧의 원화 단가. 견적은 크레딧으로 나오므로 이 값이 있어야 원화 상한을 적용할 수 있다
   creditUnitPriceKrw Decimal? @map("credit_unit_price_krw") @db.Decimal(12, 4)
   /// 단가를 모르는 동안 유료 생성을 막을지. 기본 true — 얼마가 나갈지 모르는 채로 돈을 쓰지 않는다
@@ -56,7 +58,7 @@ model SpendEntry {
   segmentId     String   @map("segment_id") @db.Uuid
   attempt       Int
   amountCredits Decimal  @map("amount_credits") @db.Decimal(14, 4)
-  status        String   @default("RESERVED") // RESERVED|SUBMITTED|SETTLED|RELEASED
+  status        String   @default("RESERVED") // RESERVED|SUBMITTED|SETTLED|FAILED|RELEASED
   /// DB 확정 후 큐 장애가 나도 제출을 복구할 수 있도록 요청을 함께 저장한다.
   dispatch      Json?
   dispatchedAt  DateTime? @map("dispatched_at") @db.Timestamptz(6)

@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
-import { generationDispatchId, getProfileCentroids, lockOrganizationSpend, reserveSpend, prisma, Prisma } from '@crez/db';
+import {
+  generationDispatchId, getProfileCentroids, lockOrganizationSpend, markSpendFailed, reserveSpend,
+  prisma, Prisma,
+} from '@crez/db';
 import {
   providerRegistry, route, StaticQuotaView,
   type GenerationRequest, type ModelDescriptor, type PromptAttachment, type ReferenceAsset,
@@ -207,6 +210,7 @@ async function submit(data: GenerationJobPayload) {
   data = { ...data, orgId: project.orgId };
   const config = project.config as {
     resolution?: string; fps?: number; requiredMode?: string; preferredModel?: string; aspectRatio?: string;
+    audio?: boolean;
   };
   const resolution = Number((config.resolution ?? '1080p').replace('p', ''));
   const requiredMode = config.requiredMode ?? 'pose-guided';
@@ -375,6 +379,8 @@ async function submit(data: GenerationJobPayload) {
     resolution,
     // 프로젝트 설정이 없으면 16:9 (§6.3). 비율을 받지 않는 제공자는 어댑터가 경고를 남긴다.
     aspectRatio: config.aspectRatio === '9:16' ? '9:16' : '16:9',
+    // 소리는 기본으로 켠다 — 설정이 없는 예전 프로젝트도 음악이 붙는다. 끄려면 명시적으로 false.
+    audio: config.audio !== false,
     mode: requiredMode as never,
     // 세그먼트 프롬프트가 우선이고 비어 있으면 씬 프롬프트를 쓴다.
     // 제공자에는 신원 고정 문구를 붙여서 보낸다 — 붙이지 않으면 시작 이미지의 인물이
@@ -438,7 +444,7 @@ async function submit(data: GenerationJobPayload) {
           routingTrace: decision.trace as never,
           params: {
             traceId: data.traceId, mode: request.mode, durationMs: request.durationMs, fps: request.fps,
-            resolution: request.resolution, aspectRatio: request.aspectRatio,
+            resolution: request.resolution, aspectRatio: request.aspectRatio, audio: request.audio,
             // 제공자에 실제로 보낸 프롬프트와 운영자가 쓴 원문을 함께 남긴다 — 결과를 나중에 설명하려면 둘 다 필요하다
             prompt: request.prompt, operatorPrompt,
             promptRisks: promptRisks.map((r) => ({ kind: r.kind, term: r.term, message: r.message })),
@@ -591,7 +597,8 @@ async function poll(
   if (state.state === 'FAILED' || state.state === 'CANCELLED') {
     const code = state.errorCode === ErrorCode.GEN_CONTENT_POLICY
       ? ErrorCode.GEN_CONTENT_POLICY : ErrorCode.GEN_PROVIDER_ERROR;
-    await failJob(genJob.id, data.segmentId, data.projectId, data, code, state.errorDetail);
+    // 제공자가 결과를 알려 준 실패다 — 원장에서 실지출을 뺀다.
+    await failJob(genJob.id, data.segmentId, data.projectId, data, code, state.errorDetail, true);
     return { state: state.state, code };
   }
 
@@ -659,6 +666,7 @@ async function rebuildRequest(generationJobId: string): Promise<GenerationReques
     resolution: Number(params.resolution ?? 1080),
     mode: (params.mode as never) ?? 'pose-guided',
     aspectRatio: params.aspectRatio === '9:16' ? '9:16' : '16:9',
+    audio: params.audio !== false,
     prompt: (params.prompt as string) ?? null,
     seed: j.seed ? Number(j.seed) : null,
     conditioningStrength: Number(params.conditioningStrength ?? 0.6),
@@ -779,17 +787,32 @@ async function cancelSubmission(data: CancelJob) {
   }
 }
 
+/**
+ * 생성 job 실패 기록.
+ *
+ * providerConfirmed는 "제공자가 실패를 확정했다"는 뜻이다. 그 경우에만 원장을 FAILED로 옮겨
+ * 실지출(실패 제외) 한도에서 뺀다 — 제공자는 실패한 요청을 과금하지 않는다고 밝히고 있다.
+ * 제출 중 오류나 폴링 timeout은 접수됐을 수 있으므로 SUBMITTED로 남겨 실지출에 계속 포함한다.
+ */
 async function failJob(
   generationJobId: string, segmentId: string, projectId: string,
-  data: { traceId: string; orgId: string }, code: string, detail: unknown,
+  data: { traceId: string; orgId: string; attempt?: number }, code: string, detail: unknown,
+  providerConfirmed = false,
 ) {
-  await prisma.generationJob.update({
+  const failed = await prisma.generationJob.update({
     where: { id: generationJobId },
     data: {
       status: 'FAILED', finishedAt: new Date(),
       errorCode: code, errorDetail: { detail: String(detail) } as never,
     },
   });
+
+  if (providerConfirmed) {
+    await prisma.$transaction(async (tx) => {
+      await lockOrganizationSpend(tx, data.orgId);
+      await markSpendFailed(tx, data.orgId, segmentId, failed.attempt);
+    });
+  }
 
   const segment = await prisma.segment.findUnique({ where: { id: segmentId } });
   // 다시 보내도 결과가 같은 코드 — 콘텐츠 정책 거부, 모델 접근 불가, 크레딧 부족.

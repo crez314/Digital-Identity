@@ -131,10 +131,14 @@ interface CostEstimate {
   free: boolean;
   pinnedModel: string | null;
   spend?: {
+    /** 실패한 생성을 뺀 실지출 */
     monthToDateKrw: number | null;
     remainingKrw: number | null;
+    /** 실패까지 포함한 총량 — 한도가 따로 있다 */
+    grossMonthToDateKrw?: number | null;
+    grossRemainingKrw?: number | null;
     blocked: boolean;
-    policy: { monthlyBudgetKrw: number | null };
+    policy: { monthlyBudgetKrw: number | null; monthlyGrossBudgetKrw?: number | null };
   };
 }
 
@@ -144,7 +148,12 @@ function budgetText(e: CostEstimate): string | null {
   if (!s) return null;
   if (s.blocked) return '크레딧 단가 미설정 — 유료 생성 차단됨';
   if (s.remainingKrw === null) return null;
-  return `이번 달 ${(s.monthToDateKrw ?? 0).toLocaleString('ko-KR')}원 사용 · 남은 한도 ${s.remainingKrw.toLocaleString('ko-KR')}원`;
+  const won = (n: number) => n.toLocaleString('ko-KR');
+  const base = `이번 달 ${won(s.monthToDateKrw ?? 0)}원 사용 · 남은 한도 ${won(s.remainingKrw)}원`;
+  // 실패한 생성은 과금되지 않아 위 금액에서 빠져 있다. 실패까지 포함한 총량은 따로 천장이 있다.
+  const failed = (s.grossMonthToDateKrw ?? 0) - (s.monthToDateKrw ?? 0);
+  if (failed <= 0 || s.grossRemainingKrw === null || s.grossRemainingKrw === undefined) return base;
+  return `${base} · 실패 포함 ${won(s.grossMonthToDateKrw ?? 0)}원(실패 ${won(failed)}원) · 실패 포함 남은 한도 ${won(s.grossRemainingKrw)}원`;
 }
 
 /** 모델이 고정돼 있으면 한 값, 아니면 구간으로 보여 준다 */

@@ -21,6 +21,17 @@ function costConfirmThreshold(): number {
   return Number.isFinite(v) && v >= 0 ? v : COST_CONFIRM_THRESHOLD;
 }
 
+/**
+ * 모델의 초당 단가. 소리를 켜면 카탈로그가 공시한 상한 단가(costPerSecondAudio)를 쓴다 —
+ * 모르면 기본 단가를 그대로 쓰되, 아는 경우에는 높은 쪽으로 잡아 한도가 모자라게 계산되지 않게 한다.
+ */
+function ratePerSecond(model: { costPerSecond: unknown; capabilities: unknown }, audio: boolean): number {
+  const base = Number(model.costPerSecond ?? 0);
+  if (!audio) return base;
+  const withAudio = (model.capabilities as { costPerSecondAudio?: number } | null)?.costPerSecondAudio;
+  return typeof withAudio === 'number' && withAudio > base ? withAudio : base;
+}
+
 @Injectable()
 export class GenerationService {
   constructor(
@@ -199,6 +210,8 @@ export class GenerationService {
     // 라우터는 길이·인원·해상도까지 더 걸러내므로 여기 후보는 실제 후보를 포함하는 더 넓은 집합이다 —
     // 상한 판정에 쓰는 max는 그만큼 보수적이 된다.
     const mode = config.requiredMode;
+    // 소리를 켜면 초당 단가가 오르는 모델이 있다 — 견적도 그 단가로 잡아야 한도가 제 역할을 한다.
+    const audio = (config as { audio?: boolean }).audio !== false;
     const candidates = models.filter((m) => {
       if (!mode) return true;
       const modes = (m.capabilities as { modes?: string[] } | null)?.modes;
@@ -221,7 +234,7 @@ export class GenerationService {
       candidates.map((m) => ({
         code: m.code,
         costPerSecond: m.code.startsWith('mock') || (m.capabilities as { billable?: boolean } | null)?.billable === false
-          ? 0 : Number(m.costPerSecond ?? 0),
+          ? 0 : ratePerSecond(m, audio),
         // 제공자가 고정 길이만 받으면 과금 길이가 구간 길이와 다르다 — 4초 구간이 5초로 올라간다
         durations: (m.capabilities as { durations?: number[] } | null)?.durations ?? null,
       })),

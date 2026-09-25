@@ -187,3 +187,42 @@ describe('Higgsfield 새 모델 — 요청 본문', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('Higgsfield — 소리(음악) 생성', () => {
+  it('요청하면 모델별 필드로 소리를 켠다', async () => {
+    const seedance = await submittedBody('/bytedance/seedance-2.5/reference-to-video', { audio: true });
+    expect(seedance.generate_audio).toBe(true);
+    fetchMock.mockClear();
+    const kling = await submittedBody('/kling-video/v3.0/pro/image-to-video', { audio: true });
+    expect(kling.sound).toBe('on');
+  });
+
+  it('요청하지 않으면 끈다 — 기본은 무음이다', async () => {
+    const seedance = await submittedBody('/bytedance/seedance-2.5/reference-to-video');
+    expect(seedance.generate_audio).toBe(false);
+    fetchMock.mockClear();
+    const kling = await submittedBody('/kling-video/v3.0/pro/image-to-video');
+    expect(kling.sound).toBe('off');
+  });
+
+  it('소리를 못 만드는 모델에는 필드를 보내지 않는다 — 스키마에 없는 값을 보내면 400이다', async () => {
+    const body = await submittedBody('/minimax/h3/reference-to-video', { audio: true });
+    expect(body.generate_audio).toBeUndefined();
+    expect(body.sound).toBeUndefined();
+    expect(violations(body, schemas['/minimax/h3/reference-to-video'])).toEqual([]);
+  });
+
+  it('소리를 켜면 아는 경우 더 높은 단가로 견적한다 — 한도가 모자라게 계산되면 안 된다', () => {
+    const p = new HiggsfieldProvider('t', { endpoint: '/bytedance/seedance-2.5/reference-to-video' });
+    const withAudioRate = {
+      ...model('t'),
+      costPerSecond: 0.2057,
+      capabilities: { ...model('t').capabilities, costPerSecondAudio: 0.4623 },
+    };
+    expect(p.estimateCost(req({ durationMs: 5000, audio: true }), withAudioRate)).toBeCloseTo(0.4623 * 5, 4);
+    expect(p.estimateCost(req({ durationMs: 5000 }), withAudioRate)).toBeCloseTo(0.2057 * 5, 4);
+    // 오디오 단가를 모르는 모델은 기본 단가를 그대로 쓴다
+    expect(p.estimateCost(req({ durationMs: 5000, audio: true }), { ...model('t'), costPerSecond: 0.2057 }))
+      .toBeCloseTo(0.2057 * 5, 4);
+  });
+});

@@ -8,8 +8,10 @@ import type { AuthUser } from '../../common/auth/auth.types';
 import { SpendService } from './spend.service';
 
 const UpdateSpendPolicy = z.object({
-  /** 월 상한(원). null이면 금액 상한을 걸지 않는다 */
+  /** 월 상한(원) — 실패한 생성 제외. null이면 금액 상한을 걸지 않는다 */
   monthlyBudgetKrw: z.number().nonnegative().nullable().optional(),
+  /** 월 상한(원) — 실패한 생성 포함. null이면 총량 상한을 걸지 않는다 */
+  monthlyGrossBudgetKrw: z.number().nonnegative().nullable().optional(),
   /** 1 크레딧의 원화 단가 — 이 값이 있어야 원화 한도를 적용할 수 있다 */
   creditUnitPriceKrw: z.number().positive().nullable().optional(),
   /** 단가를 모르는 동안 유료 생성을 막을지 */

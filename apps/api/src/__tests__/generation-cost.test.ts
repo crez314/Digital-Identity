@@ -46,6 +46,7 @@ function setup(segments: ReturnType<typeof segment>[], opts: {
     spendEntry: {
       findMany: vi.fn().mockResolvedValue([]), upsert: vi.fn(), update: vi.fn(),
       aggregate: vi.fn().mockResolvedValue({ _max: { attempt: 0 }, _sum: { amountCredits: 0 } }),
+      groupBy: vi.fn().mockResolvedValue([]),
     },
     $executeRaw: vi.fn(),
   };

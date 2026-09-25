@@ -100,9 +100,18 @@ export interface EndpointSpec {
   cfgScale?: boolean;
   /** 스펙에 negative_prompt가 있다 — 인물 교체·컷 전환을 한 번 더 막는다 */
   negativePrompt?: boolean;
-  /** 고정 필드. 오디오는 별도 파이프라인이라 생성 단계에서 끈다 */
+  /**
+   * 소리 생성 스위치. 모델마다 필드와 값이 다르다(generate_audio: true/false vs sound: 'on'/'off').
+   * 없으면 그 모델은 소리를 만들지 못한다 — 요청이 와도 보내지 않고 경고만 남긴다.
+   */
+  audio?: { field: string; on: unknown; off: unknown };
+  /** 그 밖의 고정 필드 */
   fixed?: Readonly<Record<string, unknown>>;
 }
+
+/** 스펙 표기가 둘로 갈린다 — bytedance·veo는 불리언, kling은 'on'/'off' 문자열 */
+const AUDIO_FLAG = { field: 'generate_audio', on: true, off: false } as const;
+const AUDIO_SOUND = { field: 'sound', on: 'on', off: 'off' } as const;
 
 const VEO_RES = [[720, '720'], [1080, '1080']] as const;
 const P_RES = [[720, '720p'], [1080, '1080p']] as const;
@@ -116,22 +125,22 @@ const KLING_LEGACY: EndpointSpec = {
   images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, negativePrompt: true,
 };
 const KLING_V3: EndpointSpec = {
-  images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, fixed: { sound: 'off' },
+  images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, audio: AUDIO_SOUND,
 };
 
 export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
   // reference-to-video — Identity conditioning 경로. veo3.1은 스펙 maxItems=3
   '/veo3.1/reference-to-video': {
     images: { field: 'image_urls', max: 3 }, durationType: 'string', resolutions: VEO_RES,
-    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+    aspectRatios: WIDE_RATIOS, audio: AUDIO_FLAG,
   },
   '/veo3.1/image-to-video': {
     images: { field: 'image_url' }, durationType: 'string', resolutions: VEO_RES,
-    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+    aspectRatios: WIDE_RATIOS, audio: AUDIO_FLAG,
   },
   '/veo3.1/fast/image-to-video': {
     images: { field: 'image_url' }, durationType: 'string', resolutions: VEO_RES,
-    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+    aspectRatios: WIDE_RATIOS, audio: AUDIO_FLAG,
   },
   '/sora-2/image-to-video': { images: { field: 'image_url' }, durationType: 'integer', resolutions: P_RES },
 
@@ -142,7 +151,7 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
   '/kling-video/v2.5-turbo/standard/image-to-video': KLING_LEGACY,
   '/kling-video/v2.6/pro/image-to-video': {
     images: { field: 'image_url' }, durationType: 'integer', cfgScale: true, aspectRatios: KLING_RATIOS,
-    fixed: { sound: 'off' },
+    audio: AUDIO_SOUND,
   },
   '/kling-video/v3.0/std/image-to-video': KLING_V3,
   '/kling-video/v3.0/pro/image-to-video': KLING_V3,
@@ -151,7 +160,7 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
   // 레퍼런스 장수 상한이 스키마에 없다 — 모르는 상한을 넘겨 400을 받지 않도록 보수적으로 4장
   '/kling-video/o3/image-reference': {
     images: { field: 'image_urls', max: 4, perIdentity: 2 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
-    fixed: { sound: 'off' },
+    audio: AUDIO_SOUND,
   },
   '/kling-video/omni/image-reference': {
     images: { field: 'image_urls', max: 4, perIdentity: 2 }, durationType: 'integer', aspectRatios: KLING_RATIOS,
@@ -159,19 +168,19 @@ export const ENDPOINT_SPECS: Readonly<Record<string, EndpointSpec>> = {
 
   '/bytedance/seedance-2.5/image-to-video': {
     images: { field: 'image_url' }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
-    fixed: { generate_audio: false },
+    audio: AUDIO_FLAG,
   },
   '/bytedance/seedance-2.5/reference-to-video': {
     images: { field: 'image_urls', max: 30, perIdentity: 8 }, durationType: 'integer', resolutions: SEEDANCE_25_RES,
-    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+    aspectRatios: WIDE_RATIOS, audio: AUDIO_FLAG,
   },
   '/bytedance/seedance-2.0/image-to-video': {
     images: { field: 'image_url' }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
-    fixed: { generate_audio: false },
+    audio: AUDIO_FLAG,
   },
   '/bytedance/seedance-2.0/reference-to-video': {
     images: { field: 'image_urls', max: 9, perIdentity: 8 }, durationType: 'integer', resolutions: SEEDANCE_20_RES,
-    aspectRatios: WIDE_RATIOS, fixed: { generate_audio: false },
+    aspectRatios: WIDE_RATIOS, audio: AUDIO_FLAG,
   },
 
   // H3는 해상도가 '2K' 하나뿐이다
@@ -336,6 +345,17 @@ export class HiggsfieldProvider implements GenerationProvider {
       body.cfg_scale = promptAdherenceFromConditioning(req.conditioningStrength);
     }
     if (spec.negativePrompt) body.negative_prompt = IDENTITY_NEGATIVE_PROMPT;
+
+    const wantsAudio = req.audio === true;
+    if (spec.audio) {
+      body[spec.audio.field] = wantsAudio ? spec.audio.on : spec.audio.off;
+    } else if (wantsAudio) {
+      // 소리를 켜 달라고 했는데 이 모델은 만들지 못한다 — 조용히 무음으로 내보내지 않는다
+      logger.warn(
+        { segmentId: req.segmentId, endpoint: ep },
+        'higgsfield: 이 모델은 소리를 만들지 못한다 — 무음으로 생성된다',
+      );
+    }
     return { ...body, ...spec.fixed };
   }
 
@@ -390,7 +410,12 @@ export class HiggsfieldProvider implements GenerationProvider {
 
   estimateCost(req: GenerationRequest, model: ModelDescriptor): number {
     const { value: seconds } = durationFor(this.cfg.endpoint, req.durationMs);
-    const perSecond = model?.costPerSecond ?? 0;  // 계약 단가 미확정 시 0
+    // 소리를 켜면 초당 단가가 오르는 모델이 있다(카탈로그가 가격을 범위로 공시한다).
+    // 모르면 기본 단가를 쓰되, 아는 경우에는 높은 쪽으로 잡아 한도가 모자라게 계산되지 않게 한다.
+    const audioRate = (model?.capabilities as { costPerSecondAudio?: number } | null)?.costPerSecondAudio;
+    const perSecond = req.audio === true && typeof audioRate === 'number' && audioRate > 0
+      ? audioRate
+      : model?.costPerSecond ?? 0;  // 계약 단가 미확정 시 0
     return Number((seconds * perSecond).toFixed(4));
   }
 }

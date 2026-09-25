@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { lockOrganizationSpend, readSpendCredits, readSpendPolicy, requireBudget, type PrismaClient } from '@crez/db';
+import { lockOrganizationSpend, readSpendLedger, readSpendPolicy, requireBudget, type PrismaClient } from '@crez/db';
 import { checkBudget, monthStart, type BudgetVerdict, type SpendPolicy } from '@crez/engine';
 import { PRISMA } from '../../common/prisma.module';
 import { AuditService } from '../../common/audit/audit.service';
@@ -23,21 +23,32 @@ export class SpendService {
     return readSpendPolicy(this.prisma, orgId);
   }
 
-  /** 프로젝트가 삭제되어도 독립 원장의 예약·제출·확정 비용을 센다. */
-  monthToDateCredits(orgId: string, now = new Date()): Promise<number> {
-    return readSpendCredits(this.prisma, orgId, now);
+  /**
+   * 프로젝트가 삭제되어도 독립 원장의 예약·제출·확정 비용을 센다.
+   * net은 실패를 뺀 실지출, gross는 실패까지 포함한 총량이다.
+   */
+  ledgerOf(orgId: string, now = new Date()) {
+    return readSpendLedger(this.prisma, orgId, now);
   }
 
   /** 지출 정책과 이번 달 사용 현황 */
   async status(user: AuthUser) {
     const policy = await this.policyOf(user.orgId);
-    const credits = await this.monthToDateCredits(user.orgId);
-    const verdict = checkBudget({ policy, monthToDateCredits: credits, estimateCredits: 0 });
+    const ledger = await this.ledgerOf(user.orgId);
+    const verdict = checkBudget({
+      policy, monthToDateCredits: ledger.net, grossMonthToDateCredits: ledger.gross, estimateCredits: 0,
+    });
     return {
       policy,
-      monthToDateCredits: credits,
+      /** 실패를 뺀 실지출 */
+      monthToDateCredits: ledger.net,
       monthToDateKrw: verdict.monthToDateKrw,
       remainingKrw: verdict.remainingKrw,
+      /** 실패까지 포함한 총량 */
+      grossMonthToDateCredits: ledger.gross,
+      grossMonthToDateKrw: verdict.grossMonthToDateKrw,
+      grossRemainingKrw: verdict.grossRemainingKrw,
+      failedCredits: Number((ledger.gross - ledger.net).toFixed(4)),
       /** 단가를 몰라 유료 생성이 막혀 있는 상태인가 */
       blocked: verdict.reason === 'UNPRICED',
       since: monthStart().toISOString(),
@@ -46,7 +57,10 @@ export class SpendService {
 
   async update(
     user: AuthUser,
-    input: { monthlyBudgetKrw?: number | null; creditUnitPriceKrw?: number | null; blockWhenUnpriced?: boolean },
+    input: {
+      monthlyBudgetKrw?: number | null; monthlyGrossBudgetKrw?: number | null;
+      creditUnitPriceKrw?: number | null; blockWhenUnpriced?: boolean;
+    },
     traceId: string,
   ) {
     const { before, row } = await this.prisma.$transaction(async (tx) => {
@@ -68,6 +82,7 @@ export class SpendService {
     });
     return {
       monthlyBudgetKrw: row.monthlyBudgetKrw === null ? null : Number(row.monthlyBudgetKrw),
+      monthlyGrossBudgetKrw: row.monthlyGrossBudgetKrw === null ? null : Number(row.monthlyGrossBudgetKrw),
       creditUnitPriceKrw: row.creditUnitPriceKrw === null ? null : Number(row.creditUnitPriceKrw),
       blockWhenUnpriced: row.blockWhenUnpriced,
     };
@@ -79,7 +94,7 @@ export class SpendService {
    */
   async assertWithinBudget(orgId: string, estimateCredits: number): Promise<BudgetVerdict> {
     const policy = await this.policyOf(orgId);
-    const monthToDateCredits = await this.monthToDateCredits(orgId);
-    return requireBudget(policy, monthToDateCredits, estimateCredits);
+    const ledger = await this.ledgerOf(orgId);
+    return requireBudget(policy, ledger, estimateCredits);
   }
 }

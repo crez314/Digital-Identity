@@ -37,7 +37,7 @@ export default function ProjectsPage() {
   // 쓸 수 있는 모델이 있는 방식을 기본값으로 잡는다 — 모델 목록이 도착하면 다시 계산된다
   const startMode = defaultMode(models.data);
   const current: GenerationSettings = settings ?? {
-    requiredMode: startMode, resolution: '1080p', aspectRatio: '16:9',
+    requiredMode: startMode, resolution: '1080p', aspectRatio: '16:9', audio: true,
     preferredModel: defaultModelFor(models.data, startMode),
   };
 

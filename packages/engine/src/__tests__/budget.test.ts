@@ -7,6 +7,7 @@ import { checkBudget, monthStart, type SpendPolicy } from '../budget';
  */
 const policy = (over: Partial<SpendPolicy> = {}): SpendPolicy => ({
   monthlyBudgetKrw: 100_000,
+  monthlyGrossBudgetKrw: null,
   creditUnitPriceKrw: 250,
   blockWhenUnpriced: true,
   ...over,
@@ -78,5 +79,60 @@ describe('월 지출 한도', () => {
 describe('집계 기준 달', () => {
   it('그 달의 1일 0시부터 센다', () => {
     expect(monthStart(new Date('2026-09-18T12:34:56Z')).toISOString()).toBe('2026-09-01T00:00:00.000Z');
+  });
+});
+
+/**
+ * 한도는 둘이다. 실패한 생성은 제공자가 과금하지 않으므로 실제 지출(실패 제외)로 통제하고,
+ * 실패가 쏟아지는 상황(잘못된 레퍼런스·제공자 장애)을 잡기 위해 실패 포함 총량에도 천장을 둔다.
+ */
+describe('실패 포함 한도', () => {
+  const two = (over: Partial<SpendPolicy> = {}) =>
+    policy({ monthlyBudgetKrw: 300_000, monthlyGrossBudgetKrw: 500_000, creditUnitPriceKrw: 1_000, ...over });
+
+  it('실패분은 실패 제외 한도를 깎지 않는다', () => {
+    // 성공 100크레딧(10만원) + 실패 150크레딧(15만원) = 실패 포함 25만원
+    const v = checkBudget({
+      policy: two(), monthToDateCredits: 100, grossMonthToDateCredits: 250, estimateCredits: 100,
+    });
+    expect(v.allowed).toBe(true);
+    expect(v.monthToDateKrw).toBe(100_000);
+    expect(v.grossMonthToDateKrw).toBe(250_000);
+    expect(v.remainingKrw).toBe(200_000);
+    expect(v.grossRemainingKrw).toBe(250_000);
+  });
+
+  it('실패 제외 한도를 넘으면 OVER_BUDGET으로 막는다', () => {
+    const v = checkBudget({
+      policy: two(), monthToDateCredits: 290, grossMonthToDateCredits: 290, estimateCredits: 20,
+    });
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toBe('OVER_BUDGET');
+  });
+
+  it('성공분은 여유가 있어도 실패가 쌓여 총량을 넘으면 막는다', () => {
+    // 성공 50크레딧(5만원)뿐이지만 실패까지 490크레딧(49만원) — 이번 실행 20크레딧이면 51만원
+    const v = checkBudget({
+      policy: two(), monthToDateCredits: 50, grossMonthToDateCredits: 490, estimateCredits: 20,
+    });
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toBe('OVER_GROSS_BUDGET');
+    expect(v.message).toContain('실패 포함');
+    expect(v.message).toContain('440,000원');   // 그중 실패
+  });
+
+  it('실패 포함 한도가 없으면 실패 제외 한도만 본다', () => {
+    const v = checkBudget({
+      policy: two({ monthlyGrossBudgetKrw: null }),
+      monthToDateCredits: 50, grossMonthToDateCredits: 5_000, estimateCredits: 20,
+    });
+    expect(v.allowed).toBe(true);
+    expect(v.grossRemainingKrw).toBeNull();
+  });
+
+  it('실패 집계를 넘기지 않으면 성공분만으로 판단한다 — 기존 호출자와 같은 결과', () => {
+    const v = checkBudget({ policy: two(), monthToDateCredits: 100, estimateCredits: 100 });
+    expect(v.allowed).toBe(true);
+    expect(v.grossMonthToDateKrw).toBe(100_000);
   });
 });

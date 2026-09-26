@@ -20,6 +20,13 @@ describe('신원 고정 프롬프트', () => {
     expect(withIdentityAnchor('  ')).toBe(IDENTITY_ANCHOR);
   });
 
+  it('의상은 레퍼런스가 아니라 클립 내내 일관되게만 건다', () => {
+    // same outfit이면 레퍼런스 사진의 옷이 운영자가 지정한 무대 의상을 이긴다 — 실측에서 그게
+    // 시스루 뷔스티에였고 결과물이 4번 연속 정책 거부됐다
+    expect(IDENTITY_ANCHOR).not.toContain('same outfit');
+    expect(IDENTITY_ANCHOR).toContain('stays the same from the first frame to the last');
+  });
+
   it('부정 프롬프트가 인물 교체와 컷 전환을 막는다', () => {
     expect(IDENTITY_NEGATIVE_PROMPT).toContain('different person');
     expect(IDENTITY_NEGATIVE_PROMPT).toContain('scene change');

@@ -17,9 +17,17 @@
  * 인원 수는 제한하지 않는다 — "멤버들과 함께" 같은 요구를 막는 대신, 레퍼런스 인물이
  * 주 피사체 자리를 지키도록만 강제한다.
  */
+/**
+ * 의상은 "레퍼런스와 같게"가 아니라 "클립 내내 같게"로 건다.
+ * 예전 문구는 `same outfit`이라 레퍼런스 사진의 옷을 그대로 재현하라는 뜻이 됐다. 그래서 운영자가
+ * 프롬프트에 무대 의상을 지정해도 레퍼런스의 옷이 이겼고, 레퍼런스가 시스루 뷔스티에였던 프로젝트는
+ * 결과물이 계속 nsfw로 거부됐다(2026-09-26, 4연속). 막으려던 것은 클립 중간에 옷이 바뀌는 것이지
+ * 운영자가 정한 의상이 아니다.
+ */
 export const IDENTITY_ANCHOR =
   'The person in the reference image stays the main subject for the entire clip: '
-  + 'same face, same hairstyle, same outfit, no replacement by another person. '
+  + 'same face, same hairstyle, no replacement by another person. '
+  + 'Whatever outfit the scene calls for, it stays the same from the first frame to the last. '
   + 'One continuous shot from the reference image — no cut, no scene change, camera stays on this person.';
 
 /** 부정 프롬프트 — negative_prompt를 받는 제공자에만 보낸다 */

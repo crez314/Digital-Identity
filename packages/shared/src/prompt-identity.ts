@@ -40,6 +40,26 @@ export function withIdentityAnchor(prompt: string | null): string {
 }
 
 /**
+ * 콘텐츠 정책(nsfw) 거부 뒤 자동 재제출에 덧붙이는 안전 문구.
+ *
+ * Higgsfield의 nsfw 판정은 **결과물**을 보고 내린다 — 같은 프롬프트·같은 레퍼런스로 보낸 요청이
+ * 성공하기도 하고 거부되기도 한다(2026-09-25 seedance 2.5 실측: 접수 12건 중 3건 nsfw).
+ * 그래서 재시도는 씨앗만 바꾸지 않고, 판정을 넘길 여지를 남기도록 의상·동작을 보수적으로 못 박는다.
+ * 운영자 문장은 고치지 않고 뒤에 붙이기만 한다 — 결과를 설명할 수 있어야 한다.
+ */
+export const SAFE_CONTENT_CLAUSE =
+  'Content must stay safe for all audiences: everyone fully clothed in modest everyday wardrobe, '
+  + 'neutral non-suggestive posture and framing, no nudity, no lingerie or swimwear, '
+  + 'no intimate contact, no violence.';
+
+/** 정책 거부 재시도용 프롬프트. 이미 붙어 있으면 다시 붙이지 않는다. */
+export function withSafeContent(prompt: string): string {
+  const base = (prompt ?? '').trim();
+  if (base.includes(SAFE_CONTENT_CLAUSE)) return base;
+  return base ? `${base}\n\n${SAFE_CONTENT_CLAUSE}` : SAFE_CONTENT_CLAUSE;
+}
+
+/**
  * cfg_scale(kling 등) ← conditioningStrength 변환.
  *
  * 이 시스템의 conditioningStrength는 "신원 조건화 강도"다 — 높을수록 레퍼런스 인물에 붙어야 한다.

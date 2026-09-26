@@ -32,6 +32,12 @@ describe('생성 실행 화면', () => {
     const event = { type: 'ERROR', traceId: 'current', segmentId: 's',
       at: '2020-01-01T00:00:00Z', payload: { detail: '한도 초과' } };
     expect(generationRunErrors([event, { ...event, traceId: 'previous' }], { ids: ['s'], traceId: 'current' }))
-      .toEqual([{ code: undefined, message: '한도 초과', at: event.at }]);
+      .toEqual([{ code: undefined, message: '한도 초과', at: event.at, retrying: false }]);
+  });
+
+  it('정책 거부에 자동 재시도가 걸린 오류는 재시도 중으로 표시한다', () => {
+    const event = { type: 'ERROR', traceId: 'current', segmentId: 's', at: '2020-01-01T00:00:00Z',
+      payload: { code: 'CREZ-GEN-003', detail: 'nsfw로 거부됨', policyRetry: { retrying: true, rejections: 1, attempt: 2 } } };
+    expect(generationRunErrors([event], { ids: ['s'], traceId: 'current' })[0].retrying).toBe(true);
   });
 });

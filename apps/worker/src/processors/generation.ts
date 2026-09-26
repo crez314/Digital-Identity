@@ -10,7 +10,7 @@ import {
 } from '@crez/providers';
 import {
   CrezError, ErrorCode, MAX_CHAIN_LENGTH, MAX_GENERATION_ATTEMPT, QUEUE,
-  childLogger, isChargelessFailure, storageKey, withIdentityAnchor, QUEUE_POLICY,
+  childLogger, isChargelessFailure, storageKey, withIdentityAnchor, withSafeContent, QUEUE_POLICY,
 } from '@crez/shared';
 import { inspectPrompt, summarizeRisks } from '@crez/engine';
 import { JOB_NAME, type GenerationJobPayload, type GenerationPollJob } from '@crez/contracts';
@@ -22,6 +22,7 @@ import { materializeOutput } from '../lib/materialize';
 import { presignedGet } from '../lib/media-io';
 import { presignReference } from '../lib/reference-image';
 import { hostReferencesOnProvider } from '../lib/provider-assets';
+import { policyRetryLimit, retryAfterContentPolicy } from '../lib/policy-retry';
 import { assertReferenceOriginsReachable } from '../lib/reference-origin';
 import {
   buildChainStartFrame, CHAIN_ASSET_PREFIX, isSyntheticAsset, PINNED_ASSET_PREFIX, shouldChain,
@@ -387,7 +388,10 @@ async function submit(data: GenerationJobPayload) {
     // 세그먼트 프롬프트가 우선이고 비어 있으면 씬 프롬프트를 쓴다.
     // 제공자에는 신원 고정 문구를 붙여서 보낸다 — 붙이지 않으면 시작 이미지의 인물이
     // 중간에 다른 사람으로 교체된다(prompt-identity.ts에 실측 근거).
-    prompt: withIdentityAnchor(operatorPrompt),
+    // 정책(nsfw) 거부 뒤의 자동 재제출은 의상·동작을 보수적으로 못 박는 문구를 더 붙인다 (policy-retry.ts)
+    prompt: data.policyRetry
+      ? withSafeContent(withIdentityAnchor(operatorPrompt))
+      : withIdentityAnchor(operatorPrompt),
     seed,
     conditioningStrength,
     cast: castWithRefs,
@@ -546,7 +550,8 @@ async function submit(data: GenerationJobPayload) {
     // 제공자가 거절했거나 요청이 나가지도 못한 실패는 과금되지 않는다 — 예약을 실지출에서 뺀다.
     // 전송 중 끊김처럼 접수 여부를 모르는 실패는 그대로 두어 계속 실지출로 센다.
     await failJob(created.id, segment.id, project.id, data, code, e, isChargelessFailure(e));
-    // 콘텐츠 정책 거부는 재시도 대상이 아니다 (§8)
+    // 제출 단계에서 받은 정책 거부는 요청 자체를 거절한 것이다 — 같은 요청을 다시 보내도 같은 답이라
+    // 큐 재시도도, 자동 재제출도 하지 않는다 (§8). 결과물 판정으로 온 거부는 poll에서 따로 다룬다.
     if (code === ErrorCode.GEN_CONTENT_POLICY) return { failed: true, code };
     throw e;
   }
@@ -630,7 +635,9 @@ async function poll(
     const code = state.errorCode === ErrorCode.GEN_CONTENT_POLICY
       ? ErrorCode.GEN_CONTENT_POLICY : ErrorCode.GEN_PROVIDER_ERROR;
     // 제공자가 결과를 알려 준 실패다 — 원장에서 실지출을 뺀다.
-    await failJob(genJob.id, data.segmentId, data.projectId, data, code, state.errorDetail, true);
+    // 여기서 온 정책 거부는 제공자가 요청을 받아들인 뒤 **결과물**을 보고 내린 판정이라 다시 뽑으면 통과할 수 있다.
+    // 제출 단계 400(요청 자체 거절)과 달리 자동 재시도 대상으로 둔다 (policy-retry.ts).
+    await failJob(genJob.id, data.segmentId, data.projectId, data, code, state.errorDetail, true, true);
     return { state: state.state, code };
   }
 
@@ -831,7 +838,7 @@ async function cancelSubmission(data: CancelJob) {
 async function failJob(
   generationJobId: string, segmentId: string, projectId: string,
   data: { traceId: string; orgId: string; attempt?: number }, code: string, detail: unknown,
-  noCharge = false,
+  noCharge = false, allowPolicyRetry = false,
 ) {
   const failed = await prisma.generationJob.update({
     where: { id: generationJobId },
@@ -848,24 +855,48 @@ async function failJob(
     });
   }
 
+  // 콘텐츠 정책 거부는 제공자가 **결과물**을 보고 내리는 판정이라 같은 요청도 통과할 때가 있다.
+  // 규칙(횟수·시도 한도·예산) 안에서 씨앗과 안전 문구를 바꿔 한 번 다시 보낸다 (policy-retry.ts).
+  const retry = allowPolicyRetry && code === ErrorCode.GEN_CONTENT_POLICY
+    ? await retryAfterContentPolicy({
+      segmentId, projectId, orgId: data.orgId, traceId: data.traceId, failedAttempt: failed.attempt,
+    })
+    : null;
+
   const segment = await prisma.segment.findUnique({ where: { id: segmentId } });
   // 다시 보내도 결과가 같은 코드 — 콘텐츠 정책 거부, 모델 접근 불가, 크레딧 부족.
   // 원인을 고치기 전에는 재시도가 의미 없고, 유료 제공자에서는 헛돈만 나간다.
   const terminal: string[] = [ErrorCode.GEN_CONTENT_POLICY, ErrorCode.GEN_NO_CAPABLE_MODEL, ErrorCode.GEN_QUOTA_EXCEEDED];
   // 재시도 여지가 남았으면 PENDING으로 되돌려 다음 생성 요청을 받을 수 있게 한다 (§5.1)
   const exhausted = (segment?.attemptCount ?? 0) >= MAX_GENERATION_ATTEMPT || terminal.includes(code);
-  await prisma.segment.update({
-    where: { id: segmentId }, data: { status: exhausted ? 'FAILED' : 'PENDING' },
-  });
+  // 자동 재제출이 끝난 구간은 이미 GENERATING·attemptCount+1로 바뀌어 있다 — 덮어쓰지 않는다.
+  const segmentStatus = retry?.retrying ? 'GENERATING' : exhausted ? 'FAILED' : 'PENDING';
+  if (!retry?.retrying) {
+    await prisma.segment.update({ where: { id: segmentId }, data: { status: segmentStatus } });
+  }
+
+  // 재시도 사유·한도를 사람이 읽을 수 있게 붙인다 — 화면에는 이 detail만 보인다.
+  const shown = retry
+    ? retry.retrying
+      ? `${String(detail)} — 자동 재시도 ${retry.rejections}/${policyRetryLimit()} (시도 ${retry.attempt})`
+      : `${String(detail)}${retry.detail ? ` — ${retry.detail}` : ''}`
+    : String(detail);
 
   await emit({
     type: 'ERROR', projectId, segmentId,
-    payload: { code, detail: String(detail), segmentStatus: exhausted ? 'FAILED' : 'PENDING' },
+    payload: {
+      code, detail: shown, segmentStatus,
+      ...(retry ? { policyRetry: { retrying: retry.retrying, rejections: retry.rejections, attempt: retry.attempt ?? null, reason: retry.reason ?? null } } : {}),
+    },
     traceId: data.traceId,
   });
   await audit({
     orgId: data.orgId, action: 'PROJECT_GENERATED', projectId,
-    payload: { event: 'JOB_FAILED', segmentId, code, detail: String(detail) }, traceId: data.traceId,
+    payload: {
+      event: 'JOB_FAILED', segmentId, code, detail: shown,
+      ...(retry ? { policyRetry: retry } : {}),
+    },
+    traceId: data.traceId,
   });
 }
 

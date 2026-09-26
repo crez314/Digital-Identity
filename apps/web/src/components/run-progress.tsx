@@ -14,6 +14,8 @@ export interface RunError {
   code?: string;
   message?: string;
   at: string;
+  /** 정책 거부 뒤 자동 재제출이 걸린 오류 — 아직 끝난 게 아니다 */
+  retrying?: boolean;
 }
 
 export interface RunProgressProps {
@@ -81,10 +83,25 @@ export function RunProgress({ submitted, running, passed, review, failed, errors
       ) : null}
 
       {errors.length > 0 ? (
-        <div className="mt-3 rounded border border-red-200 bg-red-50 p-2 text-xs dark:border-red-900 dark:bg-red-950">
-          {errors[0].code ? <div className="font-mono text-[11px] text-red-700 dark:text-red-400">{errors[0].code}</div> : null}
-          <div className="mt-0.5 text-red-900 dark:text-red-200">{errors[0].message ?? '생성에 실패했습니다'}</div>
-          {errors.length > 1 ? <div className="mt-1 text-red-700">외 {errors.length - 1}건</div> : null}
+        // 자동 재제출이 걸린 오류는 빨강으로 두지 않는다 — 사람이 끝난 줄 알고 초기화하면 재시도가 헛돈다
+        <div
+          className={
+            errors[0].retrying
+              ? 'mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs dark:border-amber-900 dark:bg-amber-950'
+              : 'mt-3 rounded border border-red-200 bg-red-50 p-2 text-xs dark:border-red-900 dark:bg-red-950'
+          }
+        >
+          {errors[0].code ? (
+            <div className={`font-mono text-[11px] ${errors[0].retrying ? 'text-amber-700 dark:text-amber-400' : 'text-red-700 dark:text-red-400'}`}>
+              {errors[0].code}
+            </div>
+          ) : null}
+          <div className={`mt-0.5 ${errors[0].retrying ? 'text-amber-900 dark:text-amber-200' : 'text-red-900 dark:text-red-200'}`}>
+            {errors[0].message ?? '생성에 실패했습니다'}
+          </div>
+          {errors.length > 1 ? (
+            <div className={errors[0].retrying ? 'mt-1 text-amber-700' : 'mt-1 text-red-700'}>외 {errors.length - 1}건</div>
+          ) : null}
         </div>
       ) : null}
 

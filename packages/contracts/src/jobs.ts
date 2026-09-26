@@ -50,6 +50,8 @@ export const GenerationJobPayload = JobBase.extend({
     })
     .optional(),
   regenerationTaskId: z.string().uuid().optional(),
+  /** 콘텐츠 정책 거부 뒤의 자동 재제출이면 그 회차(1부터). 프롬프트에 안전 문구를 덧붙인다 */
+  policyRetry: z.number().int().positive().optional(),
   /** 직전 QC 점수 — 재생성 결과 분류(IMPROVED/NO_CHANGE/WORSE)에 사용 */
   scoreBefore: z.number().nullable().optional(),
 });

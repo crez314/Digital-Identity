@@ -381,6 +381,62 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     await expect(generation.generate(fx.user, p.project.id, {}, 'after-fix')).resolves.toBeTruthy();
   });
 
+  it('결과물 정책 거부는 규칙 안에서 한 번 자동 재제출하고, 다시 거부되면 확정 실패한다', async () => {
+    // 제공자는 결과물을 보고 nsfw를 판정한다 — 같은 요청이 통과할 때도 있어 첫 거부는 자동으로 다시 뽑는다.
+    // 다만 재시도는 시도 한도·예산을 함께 쓰고 횟수가 묶여 있어야 한다. 아니면 한 구간이 돈을 계속 태운다.
+    const fx = await fixture(60000); const p = await fx.project();
+    const { job, data } = await paidJob(fx, p);
+    const nsfw = async (target: { id: string; providerJobId: string | null }) => {
+      vi.spyOn(providerRegistry, 'resolve').mockReturnValue({
+        code: 'fake-paid',
+        poll: vi.fn().mockResolvedValue({
+          state: 'FAILED', errorCode: ErrorCode.GEN_CONTENT_POLICY, errorDetail: 'higgsfield: nsfw로 거부됨',
+        }),
+      } as never);
+      await generationProcessor({ name: JOB_NAME.GENERATION_POLL, data: {
+        ...data, generationJobId: target.id, providerJobId: target.providerJobId!, pollCount: 1,
+      } } as never);
+    };
+
+    await nsfw(job);
+    // 구간은 실패로 내려가지 않고 다음 시도로 넘어간다
+    const afterFirst = await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } });
+    expect(afterFirst.status).toBe('GENERATING');
+    expect(afterFirst.attemptCount).toBe(2);
+    expect(f.generationAdd).toHaveBeenCalledWith(JOB_NAME.GENERATION_SUBMIT,
+      expect.objectContaining({ segmentId: p.segment.id, attempt: 2, policyRetry: 1 }),
+      expect.objectContaining({ jobId: `submit-${p.segment.id}-2` }));
+    const retryEntry = await prisma.spendEntry.findUniqueOrThrow({
+      where: { segmentId_attempt: { segmentId: p.segment.id, attempt: 2 } },
+    });
+    expect(retryEntry.status).toBe('RESERVED');
+    expect(Number(retryEntry.amountCredits)).toBe(6);
+    // 거부된 시도는 실지출에서 빠지고, 재시도 예약만 실지출에 남는다
+    expect(await readSpendLedger(prisma, fx.org.id)).toEqual({ net: 6, gross: 12 });
+
+    // 재제출이 제공자에 접수된 뒤 또 거부되는 상황
+    const second = await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 2, modelId: fx.model.id, routingTrace: {}, params: { traceId: data.traceId },
+      status: 'RUNNING', providerJobId: `provider-${randomUUID()}`, startedAt: new Date(),
+    } });
+    await prisma.spendEntry.update({
+      where: { segmentId_attempt: { segmentId: p.segment.id, attempt: 2 } }, data: { status: 'SUBMITTED' },
+    });
+    f.generationAdd.mockClear();
+    await nsfw(second);
+
+    const afterSecond = await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } });
+    expect(afterSecond.status).toBe('FAILED');
+    expect(afterSecond.attemptCount).toBe(2);
+    expect(f.generationAdd).not.toHaveBeenCalled();
+    expect(await prisma.spendEntry.count({ where: { segmentId: p.segment.id } })).toBe(2);
+    expect(await readSpendLedger(prisma, fx.org.id)).toEqual({ net: 0, gross: 12 });
+    // 왜 멈췄는지 화면에 남아야 한다 — 씨앗을 바꿔도 같은 판정이니 내용을 고치라는 안내
+    const errors = f.emit.mock.calls.map(([e]) => e).filter((e) => e.type === 'ERROR');
+    expect(errors.at(-1).payload.detail).toContain('프롬프트');
+    expect(errors.at(-1).payload.policyRetry).toMatchObject({ retrying: false, rejections: 2, reason: 'LIMIT' });
+  });
+
   it('제공자 접수 여부가 불명확한 실패는 추정액을 남긴다', async () => {
     const fx = await fixture(6000); const p = await fx.project();
     await generation.generate(fx.user, p.project.id, {}, 'timeout');

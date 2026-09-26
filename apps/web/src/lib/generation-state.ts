@@ -14,6 +14,11 @@ export function generationRunErrors(events: Event[], run: { ids: string[]; trace
   if (!run) return [];
   return events.filter((e) => e.type === 'ERROR' && e.traceId === run.traceId
     && (!e.segmentId || run.ids.includes(e.segmentId)))
-    .map((e) => ({ code: e.payload.code as string | undefined,
-      message: (e.payload.message ?? e.payload.detail) as string | undefined, at: e.at }));
+    .map((e) => ({
+      code: e.payload.code as string | undefined,
+      message: (e.payload.message ?? e.payload.detail) as string | undefined,
+      at: e.at,
+      // 정책 거부는 자동 재제출로 이어질 수 있다 — 그 사이를 '실패'로 보여 주면 사람이 손을 댄다
+      retrying: (e.payload.policyRetry as { retrying?: boolean } | undefined)?.retrying === true,
+    }));
 }

@@ -47,10 +47,15 @@ export function withIdentityAnchor(prompt: string | null): string {
  * 그래서 재시도는 씨앗만 바꾸지 않고, 판정을 넘길 여지를 남기도록 의상·동작을 보수적으로 못 박는다.
  * 운영자 문장은 고치지 않고 뒤에 붙이기만 한다 — 결과를 설명할 수 있어야 한다.
  */
+/**
+ * 문구는 의상 **지정**과 싸우지 않게 쓴다. "modest everyday wardrobe"처럼 옷 종류를 바꾸라고 하면
+ * 무대 의상을 지정한 프롬프트와 충돌해 모델이 옷을 갈아입히고, 그게 곧 신원 이탈로 돌아온다.
+ * 그래서 바꾸라고 하는 건 노출·구도·접촉뿐이다.
+ */
 export const SAFE_CONTENT_CLAUSE =
-  'Content must stay safe for all audiences: everyone fully clothed in modest everyday wardrobe, '
-  + 'neutral non-suggestive posture and framing, no nudity, no lingerie or swimwear, '
-  + 'no intimate contact, no violence.';
+  'Keep the content safe for all audiences: everyone fully covered — no nudity, no bare midriff, '
+  + 'no lingerie or swimwear, no see-through fabric. Neutral non-suggestive posture, choreography '
+  + 'and camera framing: no close-up on hips or chest, no intimate contact, no violence.';
 
 /** 정책 거부 재시도용 프롬프트. 이미 붙어 있으면 다시 붙이지 않는다. */
 export function withSafeContent(prompt: string): string {

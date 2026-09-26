@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { generationDispatchId, lockOrganizationSpend, nextGenerationAttempt, reserveSpend, type Prisma, type PrismaClient } from '@crez/db';
 import { COST_CONFIRM_THRESHOLD, childLogger, CrezError, ErrorCode, MAX_GENERATION_ATTEMPT, QUEUE } from '@crez/shared';
 import { estimateRun } from '@crez/engine';
+import { assertCapableModelExists } from '@crez/providers';
 import { JOB_NAME } from '@crez/contracts';
 import { PRISMA } from '../../common/prisma.module';
 import { QueueService } from '../../common/queue/queue.service';
@@ -48,12 +49,17 @@ export class GenerationService {
    * 4분짜리는 구간 48개라 실행 한 번이 수십 건의 유료 생성이다. 누르기 전에 볼 수 있어야 한다.
    */
   async estimate(user: AuthUser, projectId: string, input: { segmentIds?: string[]; modelHint?: string }) {
-    const project = await this.prisma.project.findFirst({ where: { id: projectId, orgId: user.orgId } });
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, orgId: user.orgId },
+      include: { _count: { select: { cast: true } } },
+    });
     if (!project) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, undefined, { projectId }, 404);
     const segments = (await this.selectSegments(projectId, input.segmentIds)).filter(
       (s) => !['GENERATING', 'QC'].includes(s.status) && s.attemptCount < MAX_GENERATION_ATTEMPT,
     );
-    const cost = await this.estimateCost(project, segments, input.modelHint);
+    const cost = await this.estimateCost(
+      { config: project.config, castSize: project._count?.cast }, segments, input.modelHint,
+    );
     // 화면이 "이번 실행 얼마 / 이번 달 남은 한도 얼마"를 함께 보여줄 수 있어야 한다
     const spend = await this.spend.status(user);
     return { ...cost, spend };
@@ -194,7 +200,7 @@ export class GenerationService {
    * 그래서 쓸 수 없는 지정 모델은 여기서 거절한다.
    */
   private async estimateCost(
-    project: { config: unknown },
+    project: { config: unknown; castSize?: number },
     segments: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number }>,
     modelHint?: string,
     db: Prisma.TransactionClient = this.prisma,
@@ -217,6 +223,24 @@ export class GenerationService {
       const modes = (m.capabilities as { modes?: string[] } | null)?.modes;
       return !modes || modes.includes(mode);
     });
+
+    // 길이·인원·해상도까지 라우터와 같은 기준으로 미리 본다. 여기서 걸러내지 않으면 견적은 통과하고
+    // 워커가 제출 직전에 실패해, 시도 횟수와 예약만 쓰고 "조건을 만족하는 모델 없음"을 뒤늦게 본다.
+    if (mode && project.castSize !== undefined && segments.length > 0) {
+      const longest = Math.max(...segments.map((s) => s.endMs - s.startMs));
+      assertCapableModelExists(
+        models.map((m) => ({
+          code: m.code,
+          capabilities: m.capabilities as { maxDurationMs: number; maxPersons: number; modes: string[]; maxResolution: number },
+        })),
+        {
+          segmentDurationMs: longest,
+          castSize: project.castSize,
+          requiredMode: mode,
+          resolution: Number(((config as { resolution?: string }).resolution ?? '1080p').replace('p', '')),
+        },
+      );
+    }
 
     if (candidates.length === 0) {
       throw new CrezError(

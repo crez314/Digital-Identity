@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { CrezError } from '@crez/shared';
+import { CrezError, ErrorCode } from '@crez/shared';
 import { GenerationService } from '../modules/project/generation.service';
 
 /**
@@ -19,6 +19,8 @@ function segment(i: number, status = 'PENDING', attemptCount = 0) {
 function setup(segments: ReturnType<typeof segment>[], opts: {
   preferredModel?: string;
   requiredMode?: string;
+  resolution?: string;
+  castSize?: number;
   models?: Array<{ code: string; costPerSecond: number; capabilities?: unknown }>;
 } = {}) {
   const models = opts.models ?? [{ code: 'higgsfield-kling25-pro-i2v', costPerSecond: 0.25 }];
@@ -26,8 +28,9 @@ function setup(segments: ReturnType<typeof segment>[], opts: {
     project: {
       findFirst: vi.fn().mockResolvedValue({
         id: 'p1', status: 'READY', projectType: 'MV',
-        config: { preferredModel: opts.preferredModel, requiredMode: opts.requiredMode },
+        config: { preferredModel: opts.preferredModel, requiredMode: opts.requiredMode, resolution: opts.resolution },
         cast: [{ identityId: 'i1', profileId: 'pr1', identity: { code: 'CRZ-A008' } }],
+        _count: { cast: opts.castSize ?? 1 },
       }),
       update: vi.fn(),
     },
@@ -218,5 +221,32 @@ describe('제공자 길이로 견적을 낸다 (§12.1)', () => {
     // 구간 길이로 계산하면 10이라 상한 12를 넘지 않지만, 실제 과금 길이로는 12.5라 넘는다
     await expect(svc.generate(user, 'p1', { maxCost: 12 }, 't1')).rejects.toThrow(CrezError);
     expect(queue.add).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 견적이 모드만 보고 길이·인원·해상도를 보지 않으면, 견적은 통과하고 워커가 제출 직전에 실패한다.
+ * 그 사이 시도 횟수와 예약만 소모되고 운영자는 "조건을 만족하는 모델 없음"을 뒤늦게 본다.
+ */
+describe('견적 단계의 모델 조건 검사', () => {
+  const capable = (over: Record<string, unknown>) => ({
+    maxDurationMs: 30000, maxPersons: 4, modes: ['reference'], maxResolution: 720, durations: [5, 30], ...over,
+  });
+
+  it('해상도가 모자라면 견적 단계에서 막고 무엇이 어긋났는지 알려준다', async () => {
+    const { svc } = setup([segment(0)], {
+      requiredMode: 'reference', resolution: '1080p', castSize: 4,
+      models: [{ code: 'seedance25-reference', costPerSecond: 0.2, capabilities: capable({}) }],
+    });
+    await expect(svc.estimate(user, 'p1', {})).rejects.toMatchObject({ code: ErrorCode.GEN_NO_CAPABLE_MODEL });
+    await expect(svc.estimate(user, 'p1', {})).rejects.toThrow(/maxResolution 720 < 1080/);
+  });
+
+  it('조건을 만족하면 그대로 견적을 낸다', async () => {
+    const { svc } = setup([segment(0)], {
+      requiredMode: 'reference', resolution: '720p', castSize: 4,
+      models: [{ code: 'seedance25-reference', costPerSecond: 0.2, capabilities: capable({}) }],
+    });
+    await expect(svc.estimate(user, 'p1', {})).resolves.toMatchObject({ segmentCount: 1 });
   });
 });

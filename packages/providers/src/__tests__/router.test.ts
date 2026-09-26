@@ -30,7 +30,30 @@ describe('Model Router (§12)', () => {
 
   it('인원 수 초과 모델을 거른다', () => {
     const models = [base({ code: 'small', capabilities: { maxDurationMs: 30000, maxPersons: 2, modes: ['pose-guided'], maxResolution: 1080 } })];
-    expect(() => route(models, ctx({ castSize: 5 }))).toThrowError(/CREZ-GEN-001|조건을 만족/);
+    expect(() => route(models, ctx({ castSize: 5 }))).toThrowError(/만족하는 활성 모델이 없습니다/);
+  });
+
+  /**
+   * "조건을 만족하는 모델 없음"만 보면 무엇을 바꿔야 할지 알 수 없다.
+   * 한 가지만 어긋난 모델을 짚어 주면 해상도 한 칸만 내리면 되는 상황을 바로 알 수 있다.
+   */
+  it('한 가지만 어긋난 모델을 오류 메시지에 짚어 준다', () => {
+    const models = [
+      base({ code: 'near', capabilities: { maxDurationMs: 30000, maxPersons: 4, modes: ['reference'], maxResolution: 720 } }),
+      base({ code: 'far', capabilities: { maxDurationMs: 5000, maxPersons: 1, modes: ['i2v'], maxResolution: 720 } }),
+    ];
+    try {
+      route(models, ctx({ castSize: 4, requiredMode: 'reference', resolution: 1080, segmentDurationMs: 30000 }));
+      throw new Error('여기 오면 안 된다');
+    } catch (e) {
+      const err = e as { message: string; detail: { rejected: Array<{ code: string; reason: string }> } };
+      expect(err.message).toContain('30초 · 4명 · reference · 1080p');
+      expect(err.message).toContain('near(maxResolution 720 < 1080)');
+      // 여러 조건이 어긋난 모델은 짚어 주지 않는다 — 바꿔야 할 것이 하나가 아니다
+      expect(err.message).not.toContain('far(');
+      // 전체 사유는 detail에 남아 운영자가 확인할 수 있다
+      expect(err.detail.rejected.find((r) => r.code === 'far')?.reason).toContain(',');
+    }
   });
 
   it('identity 지표가 높은 모델을 선호한다', () => {

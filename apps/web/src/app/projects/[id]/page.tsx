@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { del, get, patch, post } from '@/lib/api';
+import { CrezApiError, del, get, patch, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
 import { useProjectEvents } from '@/hooks/use-project-events';
 import { ProjectSetup, type SetupConfig } from '@/components/project-setup';
@@ -244,9 +244,32 @@ export default function ProjectDetail() {
   const runCount = (...st: string[]) => runSegments.filter((s) => st.includes(s.status)).length;
   const runErrors: RunError[] = generationRunErrors(events, run);
   // 생성 실행이 실제로 집어가는 구간 — 대기·실패이면서 시도 한도가 남은 것 (api generate와 같은 기준)
-  const generatable = (segments.data ?? []).filter(
-    (s) => ['PENDING', 'FAILED'].includes(s.status) && s.attemptCount < MAX_ATTEMPT,
-  ).length;
+  const waiting = (segments.data ?? []).filter((s) => ['PENDING', 'FAILED'].includes(s.status));
+  const generatable = waiting.filter((s) => s.attemptCount < MAX_ATTEMPT).length;
+  // 시도 한도를 다 쓴 구간 — 초기화해야 다시 생성할 수 있다
+  const exhausted = waiting.filter((s) => s.attemptCount >= MAX_ATTEMPT);
+
+  /**
+   * 생성 실행이 막힌 이유. 버튼만 흐려 두면 왜 못 누르는지 알 수 없어
+   * "버튼이 비활성인데 원인을 모르겠다"가 반복된다.
+   */
+  const blockedReason = generate.isPending
+    ? '생성 요청을 보내는 중입니다'
+    : status === 'DRAFT'
+    ? '생성 준비(캐스팅·구간)를 먼저 완료하세요'
+    : estimate.isFetching
+    ? '예상 비용을 계산하는 중입니다'
+    : estimate.isError
+    ? `예상 비용을 계산하지 못했습니다 — ${estimate.error instanceof CrezApiError ? estimate.error.body.message : '설정을 확인하세요'}`
+    : !estimate.data
+    ? '예상 비용을 아직 받지 못했습니다'
+    : exhausted.length > 0 && generatable === 0
+    ? `구간 ${exhausted.length}개가 시도 한도(${MAX_ATTEMPT}회)를 다 썼습니다 — 초기화하면 다시 생성할 수 있습니다`
+    : generatable === 0 && (segments.data?.length ?? 0) > 0
+    ? '생성 대기 구간이 없습니다 — QC 화면에서 재생성을 요청하거나 구간을 초기화하세요'
+    : (segments.data?.length ?? 0) === 0
+    ? '구간이 없습니다'
+    : null;
   // 생성 전 단계에서만 준비 화면을 보여준다. 이후에는 캐스팅·구간을 바꿀 수 없다.
   const preparing = status === 'DRAFT' || status === 'READY';
 
@@ -281,7 +304,19 @@ export default function ProjectDetail() {
               {budgetText(estimate.data) ? <span className="ml-1 text-neutral-500">· {budgetText(estimate.data)}</span> : null}
             </span>
           ) : null}
-          <Button onClick={() => generate.mutate()} disabled={generate.isPending || estimate.isFetching || !estimate.data || estimate.isError || status === 'DRAFT' || generatable === 0}>생성 실행</Button>
+          {exhausted.length > 0 && generatable === 0 ? (
+            <Button
+              variant="secondary"
+              onClick={() => exhausted.forEach((s) => resetSegment.mutate(s.id))}
+              disabled={resetSegment.isPending}
+              title="시도 횟수를 0으로 되돌려 다시 생성할 수 있게 합니다 (생성 기록은 남습니다)"
+            >
+              {resetSegment.isPending ? '초기화 중…' : `시도 한도 초기화 (${exhausted.length}개)`}
+            </Button>
+          ) : null}
+          <Button onClick={() => generate.mutate()} disabled={blockedReason !== null} title={blockedReason ?? '생성을 실행합니다'}>
+            생성 실행
+          </Button>
           <Button variant="secondary" onClick={() => cancel.mutate()}>취소</Button>
           <Button variant="secondary" onClick={() => master.mutate()}>마스터 생성</Button>
           <Button variant="danger" onClick={confirmRemove} disabled={remove.isPending || inFlight > 0}>
@@ -291,10 +326,8 @@ export default function ProjectDetail() {
       </div>
       {inFlight > 0 ? (
         <p className="-mt-4 text-right text-xs text-neutral-500">생성·QC가 진행 중인 구간 {inFlight}개 — 삭제하려면 먼저 취소하세요</p>
-      ) : generatable === 0 && (segments.data?.length ?? 0) > 0 ? (
-        <p className="-mt-4 text-right text-xs text-neutral-500">
-          생성 대기 구간이 없습니다 — 아래 구간 목록의 &lsquo;초기화&rsquo;로 되돌리거나 QC 화면에서 재생성을 요청하세요
-        </p>
+      ) : blockedReason ? (
+        <p className="-mt-4 text-right text-xs text-amber-600">{blockedReason}</p>
       ) : null}
 
       <ErrorBox error={generate.error ?? estimate.error ?? cancel.error ?? master.error ?? remove.error} />

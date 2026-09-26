@@ -15,13 +15,15 @@ export function Badge({ children, className = '' }: { children: React.ReactNode;
 }
 
 export function Button({
-  children, onClick, disabled, variant = 'primary', type = 'button',
+  children, onClick, disabled, variant = 'primary', type = 'button', title,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   disabled?: boolean;
   variant?: 'primary' | 'secondary' | 'danger';
   type?: 'button' | 'submit';
+  /** 툴팁. 비활성 버튼은 왜 못 누르는지 여기에 적는다 */
+  title?: string;
 }) {
   const styles = {
     primary: 'bg-neutral-900 text-white hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900',
@@ -33,6 +35,7 @@ export function Button({
       type={type}
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={`rounded px-3 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${styles}`}
     >
       {children}

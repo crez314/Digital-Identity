@@ -420,6 +420,9 @@ model GenerationJob {
   providerJobId String?   @map("provider_job_id")
   costAmount    Decimal?  @map("cost_amount") @db.Decimal(12, 4)
   startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  // 마지막으로 제공자에 상태를 물어본 시각. reconciler가 "폴링이 정말 끊겼는지"를 이걸로 판단한다 —
+  // 시작 시각만 보면 오래 걸리는 생성마다 60초에 한 번씩 폴링 체인을 새로 만들어 쌓는다(§8).
+  lastPolledAt  DateTime? @map("last_polled_at") @db.Timestamptz(6)
   finishedAt    DateTime? @map("finished_at") @db.Timestamptz(6)
   errorCode     String?   @map("error_code")
   errorDetail   Json?     @map("error_detail")

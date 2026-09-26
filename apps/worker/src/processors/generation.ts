@@ -603,6 +603,11 @@ async function poll(
   };
   const provider = providerRegistry.resolve(descriptor);
   const state = await provider.poll(data.providerJobId, descriptor);
+  // 폴링이 살아 있다는 신호. reconciler는 이 시각으로 "체인이 끊겼는지"를 판단한다 —
+  // 실패해도 폴링 자체를 막지는 않는다.
+  await prisma.generationJob.update({
+    where: { id: genJob.id }, data: { lastPolledAt: new Date() },
+  }).catch(() => undefined);
 
   if (state.state === 'RUNNING') {
     if (genJob.status !== 'RUNNING') {
@@ -977,11 +982,18 @@ export async function reconcileSubmittedJobs(): Promise<number> {
       log.warn({ err: String(error), generationJobId: j.id }, '오래된 작업 정리 실패');
     }
   }
+  // "오래 걸린다"와 "폴링이 끊겼다"는 다르다. 시작 시각만 보면 13분짜리 생성 하나에 60초마다
+  // 체인이 하나씩 새로 붙어 제공자에 같은 질문을 8번씩 던진다 — 2026-09-26 로그에서 실측했다.
+  // 마지막으로 물어본 시각이 최근이면 그 체인은 살아 있는 것이므로 건드리지 않는다.
+  const deadline = new Date(Date.now() - staleAfterMs);
   const stale = await prisma.generationJob.findMany({
     where: {
       status: { in: ['SUBMITTED', 'RUNNING'] },
-      startedAt: { lt: new Date(Date.now() - staleAfterMs) },
       providerJobId: { not: null },
+      OR: [
+        { lastPolledAt: { lt: deadline } },
+        { lastPolledAt: null, startedAt: { lt: deadline } },
+      ],
     },
     include: { segment: { include: { project: true } } },
     take: 100,

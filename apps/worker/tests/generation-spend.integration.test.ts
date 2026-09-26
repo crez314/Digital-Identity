@@ -493,6 +493,25 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     expect((await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } })).status).toBe('GENERATING');
   });
 
+  it('폴링이 살아 있는 작업에는 reconciler가 체인을 새로 만들지 않는다', async () => {
+    // 시작 시각만 보면 오래 걸리는 생성마다 60초에 하나씩 폴링 체인이 붙어, 제공자에 같은 질문을
+    // 여러 번 던지고 같은 거부를 여러 경로가 동시에 처리하게 된다 — 2026-09-26 로그에서 8개까지 봤다.
+    const fx = await fixture(); const p = await fx.project();
+    const { job } = await paidJob(fx, p);   // startedAt은 5분 전이다
+    await prisma.generationJob.update({ where: { id: job.id }, data: { lastPolledAt: new Date() } });
+    await reconcileSubmittedJobs();
+    expect(f.generationAdd).not.toHaveBeenCalledWith(JOB_NAME.GENERATION_POLL,
+      expect.objectContaining({ generationJobId: job.id }), expect.anything());
+
+    // 폴링이 실제로 끊기면(마지막 질문이 오래됐으면) 그때는 다시 살린다
+    await prisma.generationJob.update({
+      where: { id: job.id }, data: { lastPolledAt: new Date(Date.now() - 600000) },
+    });
+    await reconcileSubmittedJobs();
+    expect(f.generationAdd).toHaveBeenCalledWith(JOB_NAME.GENERATION_POLL,
+      expect.objectContaining({ generationJobId: job.id }), expect.anything());
+  });
+
   it('제공자 접수 여부가 불명확한 실패는 추정액을 남긴다', async () => {
     const fx = await fixture(6000); const p = await fx.project();
     await generation.generate(fx.user, p.project.id, {}, 'timeout');

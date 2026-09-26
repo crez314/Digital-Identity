@@ -9,6 +9,7 @@ crez-ml — §7 ML 추론 서비스.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 
@@ -49,9 +50,13 @@ app = FastAPI(title="crez-ml", version="1.1.0", description="CREZ DICE ML infere
 
 
 def verify_internal(x_internal_token: str | None = Header(default=None)) -> None:
-    """서비스 간 호출만 허용한다 (§1.1 내부 토큰)."""
+    """
+    서비스 간 호출만 허용한다 (§1.1 내부 토큰).
+    이전에는 설정 토큰이 비어 있으면 검사 자체를 건너뛰었다(fail-open). 빈 토큰은 설정 단계에서 거부하고,
+    비교는 상수 시간으로 한다.
+    """
     expected = settings().ml_internal_token
-    if expected and x_internal_token != expected:
+    if not x_internal_token or not hmac.compare_digest(x_internal_token.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid internal token")
 
 
@@ -107,6 +112,8 @@ def identity_assign(req: IdentityAssignRequest) -> IdentityAssignResponse:
 def qc_score(req: QcScoreRequest) -> QcScoreResponse:
     result = qc_svc.score(
         req.videoKey, [r.model_dump() for r in req.references], req.sourceTracksKey, req.sampleFps,
+        assign_min_similarity=req.assignMinSimilarity,
+        cohort=req.cohort,
     )
     return QcScoreResponse(**result)
 

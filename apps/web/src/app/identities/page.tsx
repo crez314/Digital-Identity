@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRef, useState } from 'react';
-import { get, post } from '@/lib/api';
+import { del, get, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
 import { score } from '@/lib/format';
 
@@ -41,6 +41,30 @@ export default function IdentitiesPage() {
       qc.invalidateQueries({ queryKey: ['identities'] });
     },
   });
+
+  // 목록에서 바로 삭제. 캐스팅된 인물은 서버가 어느 프로젝트인지 알려주며 거절한다.
+  const [removing, setRemoving] = useState<string | null>(null);
+  const remove = useMutation({
+    mutationFn: (id: string) => del<{ deletedObjects: number }>(`/identities/${id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['identities'] });
+      qc.invalidateQueries({ queryKey: ['identities-all'] });
+    },
+    onSettled: () => setRemoving(null),
+  });
+
+  // 카드 전체가 링크라 삭제 버튼 클릭이 상세 화면으로 이동하지 않게 막는다
+  function confirmRemove(e: React.MouseEvent, i: IdentityRow) {
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = window.confirm(
+      `'${i.code} ${i.displayName}'을(를) 삭제할까요?\n\n`
+      + '등록한 사진·임베딩·프로파일·권리 기록과 스토리지 파일이 모두 지워지며 되돌릴 수 없습니다. (감사 로그는 남습니다)',
+    );
+    if (!ok) return;
+    setRemoving(i.id);
+    remove.mutate(i.id);
+  }
 
   // 버튼을 비활성화해 두면 왜 눌리지 않는지 알 수 없다 — 누르게 두고 빠진 입력을 알려준다.
   function submit(e: React.FormEvent) {
@@ -87,7 +111,7 @@ export default function IdentitiesPage() {
         </form>
       </div>
 
-      <ErrorBox error={create.error ?? error} />
+      <ErrorBox error={create.error ?? remove.error ?? error} />
 
       {isLoading ? (
         <Loading />
@@ -103,14 +127,25 @@ export default function IdentitiesPage() {
                   <Badge className={STATUS_STYLE[i.status] ?? ''}>{i.status}</Badge>
                 </div>
                 <div className="mt-2 text-lg font-medium">{i.displayName}</div>
-                <div className="mt-3 text-xs text-neutral-500">
-                  {i.activeProfile ? (
-                    <>
-                      프로파일 v{i.activeProfile.version} · 산포 {score(i.activeProfile.faceVariance)}
-                    </>
-                  ) : (
-                    '활성 프로파일 없음'
-                  )}
+                <div className="mt-3 flex items-end justify-between gap-2 text-xs text-neutral-500">
+                  <span>
+                    {i.activeProfile ? (
+                      <>
+                        프로파일 v{i.activeProfile.version} · 산포 {score(i.activeProfile.faceVariance)}
+                      </>
+                    ) : (
+                      '활성 프로파일 없음'
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => confirmRemove(e, i)}
+                    disabled={removing === i.id}
+                    aria-label={`${i.code} ${i.displayName} 삭제`}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-neutral-400 transition hover:bg-red-600 hover:text-white disabled:opacity-40"
+                  >
+                    {removing === i.id ? '삭제 중…' : '삭제'}
+                  </button>
                 </div>
               </Card>
             </Link>

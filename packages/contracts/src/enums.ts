@@ -4,14 +4,25 @@ import { z } from 'zod';
 
 export const UserRole = z.enum(['OWNER', 'ADMIN', 'PRODUCER', 'OPERATOR', 'VIEWER']);
 export const IdentityStatus = z.enum(['DRAFT', 'ACTIVE', 'SUSPENDED', 'ARCHIVED']);
-export const AssetType = z.enum(['FACE_IMAGE', 'BODY_IMAGE', 'VIDEO', 'MOTION_VIDEO']);
+/**
+ * UNSORTED: 슬롯을 지정하지 않고 한꺼번에 올린 사진. 워커가 측정해 FACE_IMAGE/BODY_IMAGE로 바꾼다.
+ * 분류에 실패하면 UNSORTED로 남아 사람이 슬롯을 정해 줄 때까지 프로파일에 들어가지 않는다.
+ */
+export const AssetType = z.enum(['FACE_IMAGE', 'BODY_IMAGE', 'VIDEO', 'MOTION_VIDEO', 'UNSORTED']);
 export const CaptureSlot = z.enum([
   'FRONT', 'LEFT_45', 'RIGHT_45', 'LEFT_90', 'RIGHT_90', 'UP', 'DOWN',
   'BODY_FRONT', 'BODY_LEFT', 'BODY_RIGHT', 'BODY_BACK',
 ]);
 export const Expression = z.enum(['NEUTRAL', 'SMILE', 'SERIOUS', 'SINGING', 'TALKING', 'PERFORMANCE']);
-/** 세그먼트 프롬프트에 붙이는 참고 이미지 종류 */
-export const PromptReferenceKind = z.enum(['BACKGROUND', 'OUTFIT', 'HAIR']);
+/**
+ * 세그먼트에 붙이는 참고 이미지 종류.
+ *
+ * START_FRAME만 성격이 다르다. 나머지는 제공자에게 "참고하라"고 넘기는 첨부지만,
+ * START_FRAME은 image-to-video의 **시작 프레임 자체**를 사람이 지정하는 것이다.
+ * 첨부로 넘기면 안 된다 — kling처럼 이미지를 1장만 받는 제공자는 인물 레퍼런스가
+ * 그 한 자리를 차지해 첨부가 통째로 버려진다(§12.1). 워커가 시작 프레임으로 치환한다.
+ */
+export const PromptReferenceKind = z.enum(['BACKGROUND', 'OUTFIT', 'HAIR', 'START_FRAME']);
 /** 자산 품질검사 제외 사유 (§17 CREZ-IDN-002의 세부) */
 export const AssetRejectReason = z.enum([
   'NO_FACE',            // 얼굴 슬롯에서 얼굴 미검출
@@ -21,7 +32,13 @@ export const AssetRejectReason = z.enum([
   'NOT_FULL_BODY',      // 신체 슬롯인데 전신이 화면에 다 들어오지 않는다 — 얼굴·상반신 사진
   'BODY_FACE_MISSING',  // 전신 정면 슬롯인데 얼굴이 없다 — 다른 부위 사진
   'DEACTIVATED',        // 사용자가 삭제했으나 프로파일 재현을 위해 보존 — 재검사 대상이 아니다
+  'UNCLASSIFIED',       // 자동 분류가 각도·구도를 판단하지 못했다 — 사람이 슬롯을 지정해야 한다
 ]);
+/**
+ * 출력 화면 비율 (§6.3). 미지정 시 16:9.
+ * 비율 파라미터를 받지 않는 제공자(kling 등)는 시작 이미지 비율을 따르며, 그 사실을 경고로 남긴다(§12.1).
+ */
+export const AspectRatio = z.enum(['16:9', '9:16']);
 export const EmbeddingKind = z.enum(['FACE', 'BODY']);
 export const ProfileStatus = z.enum(['BUILDING', 'ACTIVE', 'ARCHIVED', 'FAILED']);
 
@@ -71,6 +88,7 @@ export type AssetType = z.infer<typeof AssetType>;
 export type CaptureSlot = z.infer<typeof CaptureSlot>;
 export type AssetRejectReason = z.infer<typeof AssetRejectReason>;
 export type PromptReferenceKind = z.infer<typeof PromptReferenceKind>;
+export type AspectRatio = z.infer<typeof AspectRatio>;
 export type SegmentStatus = z.infer<typeof SegmentStatus>;
 export type FindingType = z.infer<typeof FindingType>;
 export type GenerationMode = z.infer<typeof GenerationMode>;

@@ -200,11 +200,18 @@ class QcScoreRequest(BaseModel):
     references: list[QcReference] = Field(min_length=1)
     sourceTracksKey: str | None = None
     sampleFps: float = 5
+    # §9.1 τ_assign — 이 유사도 미만인 track은 캐스트 인물이 아니다(호출자가 ruleset 값을 넘긴다)
+    assignMinSimilarity: float = 0.35
+    # 대조군: 이 인물이 아닌 사람들의 얼굴 centroid. track 할당에는 쓰지 않고,
+    # 같은 프레임이 남에게 몇 점을 받는지만 함께 재어 절대값에 뜻을 부여한다.
+    cohort: list[list[float]] | None = None
     traceId: str | None = None
 
 
 class QcSeriesPoint(BaseModel):
     ms: int
+    # 얼굴이 화면에서 차지한 픽셀 높이. 작으면 임베딩이 흐려진다
+    faceHeightPx: float | None = None
     similarity: float
     runnerUpSimilarity: float | None
     runnerUpIdentityId: str | None
@@ -231,6 +238,10 @@ class PerIdentityRawMetrics(BaseModel):
     faceSimilarity: float
     bodySimilarity: float | None
     temporalConsistency: float
+    # 판정 근거의 두께 — 얼굴 픽셀 높이의 중앙값
+    medianFaceHeightPx: float | None = None
+    # 대조군이 같은 프레임에서 받은 얼굴 유사도(품질 가중). 대조군을 안 넘기면 None
+    cohortFaceSimilarity: float | None = None
     # 신체의 시간축 안정성 — 얼굴과 별도로 산출한다
     temporalBodyConsistency: float | None = None
     motionConsistency: float | None

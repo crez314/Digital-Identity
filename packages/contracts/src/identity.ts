@@ -34,8 +34,12 @@ export const IdentityDto = z.object({
     .optional(),
 });
 
+/**
+ * 슬롯을 고르지 않고 한꺼번에 올릴 수 있다. assetType/captureSlot을 비우면 UNSORTED로 저장되고
+ * 워커가 측정해 정면·측면·전신으로 분류한다(§8.1 확장) — 수십·수백 장을 사람이 고를 수는 없다.
+ */
 export const AssetUploadUrlRequest = z.object({
-  assetType: AssetType,
+  assetType: AssetType.default('UNSORTED'),
   captureSlot: CaptureSlot.optional(),
   expression: Expression.optional(),
   contentType: z.string(),
@@ -54,6 +58,17 @@ export const ConfirmAssetRequest = z.object({
   assetId: z.string().uuid(),
   checksum: z.string().min(8),
   sizeBytes: z.number().int().positive().optional(),
+});
+
+/**
+ * PATCH /identities/{id}/assets/{assetId} — 잘못 올린 사진을 맞는 슬롯으로 옮긴다.
+ *
+ * 슬롯이 바뀌면 적합성 기준도 달라지므로(§8.1 얼굴 슬롯은 얼굴 비율, 전신 슬롯은 전신 비율),
+ * 옮긴 뒤 반드시 다시 판정해야 한다. 옮기기만 하고 판정을 두면 "충족"으로 보이는데 실제로는
+ * 엉뚱한 사진으로 프로파일이 빌드된다.
+ */
+export const MoveAssetSlotRequest = z.object({
+  captureSlot: CaptureSlot,
 });
 
 export const IdentityAssetDto = z.object({
@@ -128,6 +143,7 @@ export type AssetUploadUrlRequest = z.infer<typeof AssetUploadUrlRequest>;
 export type AssetUploadUrlResponse = z.infer<typeof AssetUploadUrlResponse>;
 export type ConfirmAssetRequest = z.infer<typeof ConfirmAssetRequest>;
 export type IdentityAssetDto = z.infer<typeof IdentityAssetDto>;
+export type MoveAssetSlotRequest = z.infer<typeof MoveAssetSlotRequest>;
 export type AssetListResponse = z.infer<typeof AssetListResponse>;
 export type EmbeddingDto = z.infer<typeof EmbeddingDto>;
 export type JobAcceptedResponse = z.infer<typeof JobAcceptedResponse>;

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@crez/db';
-import { getProfileCentroids } from '@crez/db';
+import { getProfileCentroids, getSourceTrackCentroids } from '@crez/db';
 import { judgeAssignments } from '@crez/engine';
 import {
   CrezError, ErrorCode, QUEUE, logger, storageKey, TRACK_CENTROID_TOP_K,
@@ -317,11 +317,7 @@ export class ProjectService {
     if (sv.tracks.length > 0 && cast.length > 0) {
       const centroids = await getProfileCentroids(cast.map((c) => c.profileId));
       const byProfile = new Map(centroids.map((c) => [c.id, c]));
-      const trackCentroids = await this.prisma.$queryRawUnsafe<Array<{ id: string; track_index: number; face: string | null; quality: string | null }>>(
-        `SELECT id, track_index, face_centroid::text AS face, quality::text AS quality
-         FROM source_track WHERE source_video_id = $1::uuid ORDER BY track_index`,
-        sourceVideoId,
-      );
+      const trackCentroids = await getSourceTrackCentroids(sourceVideoId);
 
       const references = cast
         .map((c) => ({ identityId: c.identityId, centroid: byProfile.get(c.profileId)?.faceCentroid ?? null }))
@@ -330,10 +326,10 @@ export class ProjectService {
       if (references.length > 0) {
         const tracks = trackCentroids
           .map((t) => ({
-            trackIndex: t.track_index,
-            faceCentroid: t.face ? t.face.replace(/^\[|\]$/g, '').split(',').map(Number) : null,
+            trackIndex: t.trackIndex,
+            faceCentroid: t.faceCentroid,
             bodyCentroid: null,
-            quality: t.quality ? Number(t.quality) : 0.5,
+            quality: t.quality ?? 0.5,
           }))
           .filter((t) => t.faceCentroid !== null);
 
@@ -481,6 +477,7 @@ export class ProjectService {
         latestScore: qc?.overallScore ? Number(qc.overallScore) : null,
         latestQcRunId: qc?.id ?? null,
         prompt: s.prompt,
+        chainFromPrevious: s.chainFromPrevious,
         scenePrompt: s.scene?.prompt ?? null,
         lastPrompt: lastParams ? (lastParams.prompt ?? null) : null,
         references: await Promise.all(s.references.map(async (r) => ({
@@ -505,8 +502,11 @@ export class ProjectService {
   }
 
   /**
-   * 참고 이미지(배경·의상·헤어) 업로드 URL 발급 — 인물 자산과 같은 presigned PUT 흐름(§15).
+   * 참고 이미지 업로드 URL 발급 — 인물 자산과 같은 presigned PUT 흐름(§15).
    * 확정 전에는 checksum='pending'으로 두어 생성에 섞이지 않게 한다.
+   *
+   * 배경·의상·헤어는 제공자에게 넘기는 첨부고, START_FRAME은 image-to-video의 시작 프레임
+   * 자체를 사람이 지정하는 것이라 워커가 첨부가 아니라 치환으로 다룬다.
    */
   async createReferenceUploadUrl(
     user: AuthUser, projectId: string, segmentId: string, input: PromptReferenceUploadRequest,
@@ -517,6 +517,20 @@ export class ProjectService {
       throw new CrezError(
         ErrorCode.PRJ_INVALID_STATE, `참고 이미지는 구간당 ${MAX_REFERENCES_PER_SEGMENT}장까지 첨부할 수 있습니다`, { count }, 409,
       );
+    }
+    // 시작 프레임은 구간당 하나다. 둘이면 워커가 먼저 올린 쪽을 말없이 골라 쓰고,
+    // 화면에는 둘 다 붙어 있어서 어느 것이 쓰였는지 설명할 수 없다.
+    if (input.kind === 'START_FRAME') {
+      const existing = await this.prisma.segmentReference.count({
+        where: { segmentId, active: true, kind: 'START_FRAME' },
+      });
+      if (existing > 0) {
+        throw new CrezError(
+          ErrorCode.PRJ_INVALID_STATE,
+          '시작 프레임은 구간당 한 장입니다 — 기존 시작 프레임을 지운 뒤 올리세요',
+          { segmentId }, 409,
+        );
+      }
     }
     const referenceId = randomUUID();
     const key = storageKey.segmentReference(projectId, segmentId, referenceId, REFERENCE_EXT[input.contentType]);
@@ -588,11 +602,44 @@ export class ProjectService {
   }
 
   /**
+   * 실패·검토 대기 구간을 다시 생성할 수 있게 되돌린다 (§5.1).
+   *
+   * 시도 한도를 모두 쓴 구간은 재생성 사다리(§11)로도 되살릴 수 없다 — 제출 자체가 실패해 QC 결과가 없으면
+   * 전략을 정할 수 없기 때문이다. 원인이 설정 문제(예: 레퍼런스 공개 URL 미설정)였다면 구간만 되돌려
+   * 다시 돌릴 수 있어야 한다. 생성 기록(generation_job)과 감사 로그는 지우지 않는다.
+   */
+  async resetSegment(user: AuthUser, projectId: string, segmentId: string, traceId: string) {
+    await this.requireProject(user, projectId);
+    const segment = await this.prisma.segment.findFirst({ where: { id: segmentId, projectId } });
+    if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
+    if (['GENERATING', 'QC'].includes(segment.status)) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, `${segment.status} 중에는 초기화할 수 없습니다 — 먼저 취소하세요`, null, 409);
+    }
+    if (segment.acceptedOutputId) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '이미 승인된 구간입니다 — 초기화 대상이 아닙니다', null, 409);
+    }
+
+    await this.prisma.segment.update({
+      where: { id: segmentId }, data: { status: 'PENDING', attemptCount: 0 },
+    });
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'PROJECT_GENERATED', projectId,
+      payload: {
+        event: 'SEGMENT_RESET', segmentId, segmentIndex: segment.segmentIndex,
+        from: segment.status, attemptCountBefore: segment.attemptCount,
+      },
+      traceId,
+    });
+    return { ok: true, segmentId, status: 'PENDING' as const };
+  }
+
+  /**
    * 세그먼트별 프롬프트 수정 (§6.3). 비우면 씬 프롬프트로 돌아간다.
    * 이미 제출된 생성에는 반영되지 않고 다음 시도(재생성 포함)부터 쓰인다 — 실제로 쓴 값은 job params에 남는다.
    */
   async updateSegmentPrompt(
-    user: AuthUser, projectId: string, segmentId: string, input: { prompt: string | null }, traceId: string,
+    user: AuthUser, projectId: string, segmentId: string,
+    input: { prompt: string | null; chainFromPrevious?: boolean }, traceId: string,
   ) {
     const project = await this.requireProject(user, projectId);
     if (project.status === 'ARCHIVED') {
@@ -602,14 +649,29 @@ export class ProjectService {
     if (!segment) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '세그먼트를 찾을 수 없음', { segmentId }, 404);
 
     const prompt = input.prompt?.trim() || null;
-    if (prompt !== segment.prompt) {
-      await this.prisma.segment.update({ where: { id: segmentId }, data: { prompt } });
+    // 첫 구간은 앞이 없어 이어 붙일 대상이 없다 — 켜 두면 무시되므로 애초에 받지 않는다
+    if (input.chainFromPrevious && segment.segmentIndex === 0) {
+      throw new CrezError(
+        ErrorCode.PRJ_INVALID_STATE,
+        '첫 구간은 앞 구간이 없어 이어 붙일 수 없습니다',
+        { segmentId, segmentIndex: segment.segmentIndex }, 422,
+      );
+    }
+    const chainFromPrevious = input.chainFromPrevious ?? segment.chainFromPrevious;
+
+    if (prompt !== segment.prompt || chainFromPrevious !== segment.chainFromPrevious) {
+      await this.prisma.segment.update({ where: { id: segmentId }, data: { prompt, chainFromPrevious } });
       await this.audit.record({
         orgId: user.orgId, actorId: user.id, action: 'SEGMENT_PROMPT_CHANGED', projectId,
-        payload: { segmentId, segmentIndex: segment.segmentIndex, before: segment.prompt, after: prompt }, traceId,
+        payload: {
+          segmentId, segmentIndex: segment.segmentIndex,
+          before: segment.prompt, after: prompt,
+          chainBefore: segment.chainFromPrevious, chainAfter: chainFromPrevious,
+        },
+        traceId,
       });
     }
-    return { id: segmentId, prompt };
+    return { id: segmentId, prompt, chainFromPrevious };
   }
 
   /**

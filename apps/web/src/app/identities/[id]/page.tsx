@@ -1,8 +1,10 @@
 'use client';
 
+import { useRef, useState } from 'react';
+
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
-import { del, get, post } from '@/lib/api';
+import { del, get, post, patch } from '@/lib/api';
 import { Badge, Button, Card, ErrorBox, Loading } from '@/components/ui';
 import { RightsCard } from '@/components/rights-card';
 import { uploadViaPresignedUrl } from '@/lib/upload';
@@ -60,6 +62,9 @@ const ACCEPT = 'image/jpeg,image/png,image/webp';
 type AssetState = 'UPLOADING' | 'CHECKING' | 'USABLE' | 'EXCLUDED';
 
 function assetState(a: AssetRow): AssetState {
+  // 사유가 적혔으면 워커가 이미 판정한 자산이다 — 점수가 없어도 업로드 중으로 보면 안 된다.
+  // 분류 실패(UNCLASSIFIED)는 점수 없이 사유만 남으므로 이 줄이 없으면 "업로드 미완료"로 표시된다.
+  if (a.rejectReason) return 'EXCLUDED';
   if (a.previewUrl === null && !a.isUsable && a.qualityScore === null) return 'UPLOADING';
   if (a.isUsable && a.qualityScore === null) return 'CHECKING';
   return a.isUsable ? 'USABLE' : 'EXCLUDED';
@@ -105,6 +110,11 @@ function exclusionReason(a: AssetRow): { short: string; long: string } {
       };
     case 'DEACTIVATED':
       return { short: '삭제됨(보존)', long: '삭제했지만 이미 프로파일 빌드에 쓰였을 수 있어 기록으로 보존합니다.' };
+    case 'UNCLASSIFIED':
+      return {
+        short: '분류 실패',
+        long: `${d.classifierReason ? String(d.classifierReason) : '각도와 구도를 판단하지 못했습니다'} — 아래에서 슬롯을 직접 지정하세요.`,
+      };
   }
   // 사유 컬럼 도입 전 판정 — 점수로만 추정한다
   if (a.qualityScore === 0) {
@@ -146,24 +156,32 @@ export default function IdentityDetail() {
   const refreshAssets = () => qc.invalidateQueries({ queryKey: ['identity-assets', id] });
 
   // presigned URL 발급 → 스토리지 직접 업로드 → 확정(품질 검사 큐 투입) (§6.1, §15)
+  //
+  // slot이 없으면 종류를 비워 올린다 — 워커가 측정해 정면·측면·전신으로 분류한다.
+  // 수십·수백 장을 사람이 슬롯마다 골라 넣게 하지 않기 위한 기본 경로다.
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const upload = useMutation({
-    mutationFn: async ({ slot, files }: { slot: string; files: File[] }) => {
+    mutationFn: async ({ slot, files }: { slot?: string; files: File[] }) => {
+      setUploadProgress({ done: 0, total: files.length });
       for (const file of files) {
         const contentType = file.type || 'application/octet-stream';
         await uploadViaPresignedUrl({
           file, contentType,
           requestUrl: async () => {
             const r = await post<{ assetId: string; uploadUrl: string }>(`/identities/${id}/assets/upload-url`, {
-              assetType: slot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE',
-              captureSlot: slot, contentType, fileName: file.name,
+              ...(slot
+                ? { assetType: slot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE', captureSlot: slot }
+                : {}),
+              contentType, fileName: file.name,
             });
             return { id: r.assetId, uploadUrl: r.uploadUrl };
           },
           confirm: (assetId, checksum) => post(`/identities/${id}/assets`, { assetId, checksum }),
         });
+        setUploadProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
       }
     },
-    onSettled: refreshAssets,
+    onSettled: () => { setUploadProgress(null); refreshAssets(); },
   });
 
   // 빌드에 쓰인 적 없는 자산은 실제로 지워지고, 쓰였을 수 있는 자산은 서버가 비활성화만 한다.
@@ -171,6 +189,23 @@ export default function IdentityDetail() {
     mutationFn: (assetId: string) => del<{ mode: 'DELETED' | 'DEACTIVATED' }>(`/identities/${id}/assets/${assetId}`),
     onSuccess: refreshAssets,
   });
+
+  // 슬롯을 잘못 골라 올린 사진을 옮긴다. 슬롯마다 적합성 기준이 달라서(§8.1) 서버가 다시 판정한다.
+  const moveSlot = useMutation({
+    mutationFn: (v: { assetId: string; slot: string }) =>
+      patch<{ id: string; captureSlot: string }>(`/identities/${id}/assets/${v.assetId}`, { captureSlot: v.slot }),
+    onSuccess: refreshAssets,
+  });
+  const [dragOverSlot, setDragOverSlot] = useState<string | null>(null);
+  const [bulkDragging, setBulkDragging] = useState(false);
+  // 끌고 있는 사진. dataTransfer의 사용자 정의 타입은 브라우저마다 drop에서 읽히는 조건이 달라서
+  // 같은 페이지 안의 이동은 여기서 읽는다. from이 null이면 미분류 사진이다.
+  const dragging = useRef<{ assetId: string; from: string | null } | null>(null);
+  const startDrag = (e: React.DragEvent, assetId: string, from: string | null) => {
+    dragging.current = { assetId, from };
+    e.dataTransfer.setData('text/asset-id', assetId);
+    e.dataTransfer.effectAllowed = 'move';
+  };
 
   // 기준이 바뀌었거나 ML 오류로 실패한 자산을 다시 올리지 않고 현재 기준으로 다시 판정한다.
   const recheck = useMutation({
@@ -229,15 +264,50 @@ export default function IdentityDetail() {
     ? '빌드 진행 중'
     : null;
 
+  // 아직 슬롯이 정해지지 않은 사진 — 분류 대기 중이거나 분류에 실패한 것들
+  const unsorted = assetRows.filter((a) => a.captureSlot === null && a.rejectReason !== 'DEACTIVATED');
+  // 자동 분류가 경계에 걸려 사람이 한 번 봐야 하는 사진
+  const needsReview = assetRows.filter((a) => a.captureSlot !== null && a.qualityDetail?.needsReview === true);
+
+  // 빌드 중에는 서버가 슬롯 이동을 거절한다(빌드가 읽는 자산이 바뀌면 결과가 섞인다) — 미리 막는다
+  const canDrag = !moveSlot.isPending && !building;
+
   const slotTile = (slot: string, required: boolean) => {
     const slotAssets = assetRows.filter((a) => a.captureSlot === slot && a.previewUrl);
     const filled = cov?.filledSlots.includes(slot) ?? false;
-    const busy = upload.isPending && upload.variables?.slot === slot;
+    const dropping = dragOverSlot === slot;
     return (
       <div
         key={slot}
-        className={`rounded-lg border p-3 ${
-          filled ? 'border-green-700/60' : required ? 'border-amber-700/60' : 'border-neutral-200 dark:border-neutral-800'
+        // 사진을 끌어다 놓으면 그 슬롯으로 옮긴다 — 잘못 올렸을 때 지우고 다시 올릴 필요가 없다
+        onDragOver={(e) => {
+          // 탐색기에서 끌어온 파일은 받지 않는다(업로드는 위의 한꺼번에 올리기 한 곳) — 놓을 수 없다고 표시한다.
+          // 그냥 두면 브라우저가 파일을 열며 페이지를 떠나므로 dragover는 가로챈다.
+          if (!dragging.current) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'none';
+            return;
+          }
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          setDragOverSlot(slot);
+        }}
+        onDragLeave={(e) => {
+          // 타일 안의 썸네일로 들어갈 때도 dragleave가 온다 — 타일 밖으로 나갈 때만 강조를 끈다
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragOverSlot((cur) => (cur === slot ? null : cur));
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOverSlot(null);
+          const item = dragging.current;
+          dragging.current = null;
+          if (item && item.from !== slot) moveSlot.mutate({ assetId: item.assetId, slot });
+        }}
+        className={`rounded-lg border p-3 transition ${
+          dropping
+            ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30'
+            : filled ? 'border-green-700/60' : required ? 'border-amber-700/60' : 'border-neutral-200 dark:border-neutral-800'
         }`}
       >
         <div className="flex items-center justify-between gap-2">
@@ -261,8 +331,19 @@ export default function IdentityDetail() {
               return (
                 <div
                   key={a.id}
-                  className="relative w-16"
-                  title={st === 'EXCLUDED' ? exclusionReason(a).long : `${STATE_BADGE[st].label} · 품질 ${score(a.qualityScore)}`}
+                  draggable={canDrag}
+                  onDragStart={(e) => startDrag(e, a.id, slot)}
+                  onDragEnd={() => { dragging.current = null; setDragOverSlot(null); }}
+                  className={`relative w-16 ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'}`}
+                  title={
+                    building
+                      ? '프로파일 빌드 중에는 슬롯을 옮길 수 없습니다'
+                      : st === 'EXCLUDED'
+                      ? exclusionReason(a).long
+                      : a.qualityDetail?.needsReview === true
+                      ? `자동 분류가 경계에 걸렸습니다 — ${String(a.qualityDetail.classifierReason ?? '')} 틀렸으면 끌어다 옮기세요.`
+                      : `${STATE_BADGE[st].label} · 품질 ${score(a.qualityScore)} — 끌어서 다른 슬롯으로 옮길 수 있습니다`
+                  }
                 >
                   {removable(a) ? (
                     <button
@@ -280,7 +361,11 @@ export default function IdentityDetail() {
                   <img
                     src={a.previewUrl ?? ''}
                     alt={`${slot} 자산`}
-                    className={`h-16 w-16 rounded object-cover ${st === 'EXCLUDED' ? 'opacity-30 grayscale' : ''}`}
+                    // 이미지 자체의 기본 드래그(주소 끌기) 대신 감싼 div의 드래그가 시작되게 한다
+                    draggable={false}
+                    className={`h-16 w-16 rounded object-cover ${st === 'EXCLUDED' ? 'opacity-30 grayscale' : ''} ${
+                      a.qualityDetail?.needsReview === true ? 'ring-2 ring-amber-500' : ''
+                    }`}
                   />
                   <div
                     className={`mt-1 truncate text-center text-[10px] ${
@@ -295,25 +380,11 @@ export default function IdentityDetail() {
           )}
         </div>
 
-        <label
-          className={`mt-3 block rounded border border-neutral-300 px-3 py-1.5 text-center text-sm font-medium transition dark:border-neutral-700 ${
-            upload.isPending ? 'cursor-not-allowed opacity-40' : 'cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800'
-          }`}
-        >
-          {busy ? '업로드 중…' : '이미지 선택'}
-          <input
-            type="file"
-            accept={ACCEPT}
-            multiple
-            className="hidden"
-            disabled={upload.isPending}
-            onChange={(e) => {
-              const files = [...(e.target.files ?? [])];
-              e.target.value = ''; // 같은 파일을 다시 골라도 onChange가 오도록 비운다
-              if (files.length) upload.mutate({ slot, files });
-            }}
-          />
-        </label>
+        {/*
+          슬롯별 업로드 버튼은 두지 않는다. 그 버튼이 있으면 사진을 전부 한 슬롯(주로 정면)에
+          몰아 올리게 되고, 슬롯이 이미 박혀 있으니 자동 분류가 건너뛴다. 업로드는 위의
+          한꺼번에 올리기 한 곳에서만 하고, 이 타일은 분류 결과 확인과 수정(드래그) 용도다.
+        */}
       </div>
     );
   };
@@ -345,6 +416,99 @@ export default function IdentityDetail() {
 
       <ErrorBox error={removeIdentity.error ?? upload.error ?? remove.error ?? recheck.error ?? build.error ?? activate.error} />
 
+      {/* 기본 업로드 경로 — 한꺼번에 올리면 워커가 각도·구도를 재서 슬롯을 정한다 */}
+      <Card>
+        <h2 className="font-medium">사진 한꺼번에 올리기</h2>
+        <p className="mt-1 text-xs text-neutral-500">
+          슬롯을 고르지 않고 여러 장을 그대로 올리면 정면·45°·옆모습·전신으로 자동 분류합니다.
+          많이 올릴수록 기준 벡터가 두꺼워져 일치율이 올라갑니다. 판단이 어려운 사진만 아래에 모아 두니 직접 지정하세요.
+        </p>
+        <label
+          onDragOver={(e) => {
+            // 슬롯 간 이동 드래그는 여기서 받지 않는다 — 놓을 곳처럼 강조하지 않는다
+            if (dragging.current) return;
+            e.preventDefault();
+            setBulkDragging(true);
+          }}
+          onDragLeave={() => setBulkDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setBulkDragging(false);
+            // 파일만 처리한다
+            const files = [...e.dataTransfer.files].filter((f) => ACCEPT.includes(f.type));
+            if (files.length && !upload.isPending) upload.mutate({ files });
+          }}
+          className={`mt-3 flex min-h-28 cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed px-4 py-6 text-center transition ${
+            bulkDragging
+              ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/30'
+              : 'border-neutral-300 hover:bg-neutral-50 dark:border-neutral-700 dark:hover:bg-neutral-900'
+          } ${upload.isPending ? 'cursor-not-allowed opacity-50' : ''}`}
+        >
+          <div className="text-sm font-medium">
+            {uploadProgress
+              ? `업로드 중… ${uploadProgress.done}/${uploadProgress.total}`
+              : '여기에 사진을 끌어다 놓거나 클릭해 고르세요'}
+          </div>
+          <div className="mt-1 text-xs text-neutral-500">JPG·PNG·WEBP · 같은 사람의 사진만 · 여러 장 한 번에</div>
+          <input
+            type="file"
+            accept={ACCEPT}
+            multiple
+            className="hidden"
+            disabled={upload.isPending}
+            onChange={(e) => {
+              const files = [...(e.target.files ?? [])];
+              e.target.value = '';
+              if (files.length) upload.mutate({ files });
+            }}
+          />
+        </label>
+
+        {unsorted.length > 0 ? (
+          <div className="mt-4">
+            <div className="text-sm font-medium">슬롯을 지정해야 하는 사진 {unsorted.length}장</div>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {unsorted.map((a) => (
+                <div key={a.id} className="w-28">
+                  {/* 아래 슬롯 타일로 끌어다 놓아도 지정된다 */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={a.previewUrl ?? ''}
+                    alt="분류되지 않은 사진"
+                    draggable={canDrag}
+                    onDragStart={(e) => startDrag(e, a.id, null)}
+                    onDragEnd={() => { dragging.current = null; setDragOverSlot(null); }}
+                    className={`h-28 w-28 rounded object-cover ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'opacity-40'}`}
+                    title={`${exclusionReason(a).long} 아래 슬롯으로 끌어다 놓아도 됩니다.`}
+                  />
+                  <div className="mt-1 line-clamp-2 text-[10px] text-neutral-500" title={exclusionReason(a).long}>
+                    {a.qualityDetail?.classifierReason ? String(a.qualityDetail.classifierReason) : '분류 중…'}
+                  </div>
+                  <select
+                    className="mt-1 w-full rounded border border-neutral-300 bg-transparent px-1 py-0.5 text-xs dark:border-neutral-700"
+                    defaultValue=""
+                    disabled={moveSlot.isPending}
+                    onChange={(e) => { if (e.target.value) moveSlot.mutate({ assetId: a.id, slot: e.target.value }); }}
+                  >
+                    <option value="">슬롯 지정…</option>
+                    {Object.entries(SLOT_LABELS).map(([slot, label]) => (
+                      <option key={slot} value={slot}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {needsReview.length > 0 ? (
+          <p className="mt-3 text-xs text-amber-600">
+            자동 분류가 경계에 걸린 사진 {needsReview.length}장이 있습니다 — 아래 슬롯에서 노란 테두리로 표시되며,
+            틀렸으면 끌어다 옮기세요.
+          </p>
+        ) : null}
+      </Card>
+
       {/* §6.1 캡처 슬롯 충족률 — 미충족이면 CREZ-IDN-001로 빌드가 거절된다 */}
       {cov ? (
         <Card>
@@ -359,15 +523,20 @@ export default function IdentityDetail() {
                 onClick={() => recheck.mutate()}
                 disabled={recheck.isPending || building || assetRows.length === 0}
               >
-                {recheck.isPending ? '재검사 요청 중…' : '현재 기준으로 재검사'}
+                {recheck.isPending ? '재검사 요청 중…' : '다시 분류·검사'}
               </Button>
             </div>
           </div>
           <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-neutral-500">
+            <li>업로드는 위의 <strong>한꺼번에 올리기</strong>에서 합니다. 여기는 자동 분류 결과를 보고 고치는 곳입니다.</li>
+            <li><strong>다시 분류·검사</strong>를 누르면 이미 슬롯이 정해진 사진도 다시 재서 제자리로 옮깁니다. 직접 옮긴 사진은 그대로 둡니다.</li>
+            <li>분류가 틀렸다면 <strong>사진을 끌어다 다른 슬롯에 놓으면</strong> 옮겨집니다. 옮긴 뒤 자동으로 다시 판정합니다.</li>
             <li>얼굴 슬롯(정면·45°·90°): 얼굴 위주 사진 — 얼굴이 화면 세로의 15% 이상. 전신·반신 사진은 걸러집니다.</li>
             <li>전신 슬롯: 머리부터 발끝까지 나온 사진 — 전신 정면은 얼굴도 보여야 합니다.</li>
             <li>모두 같은 사람이어야 하며(섞이면 빌드가 CREZ-IDN-003으로 실패), 품질 0.4 이상만 사용됩니다. JPG·PNG·WEBP.</li>
           </ul>
+          {/* 슬롯 이동 실패는 드래그한 자리 가까이에 보여 준다 — 맨 위 오류 칸은 타일에서 보이지 않는다 */}
+          {moveSlot.error ? <div className="mt-3"><ErrorBox error={moveSlot.error} /></div> : null}
           {recheck.data ? (
             <p className="mt-2 text-xs text-neutral-500">
               {recheck.data.queued}장을 다시 검사합니다{recheck.data.skipped ? ` · 직접 삭제한 ${recheck.data.skipped}장은 제외` : ''}.

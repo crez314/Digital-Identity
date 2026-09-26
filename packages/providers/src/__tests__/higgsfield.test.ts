@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HiggsfieldProvider, mapStatus } from '../adapters/higgsfield';
+import { HiggsfieldProvider, classifyHiggsfieldError, mapStatus } from '../adapters/higgsfield';
 import type { GenerationRequest, ModelDescriptor } from '../types';
 
 /**
@@ -16,7 +16,7 @@ const model: ModelDescriptor = {
 
 const req = (over: Partial<GenerationRequest> = {}): GenerationRequest => ({
   traceId: 't1', segmentId: 's1', attempt: 1,
-  durationMs: 6000, fps: 24, resolution: 720, mode: 'reference',
+  durationMs: 6000, fps: 24, resolution: 720, mode: 'reference', aspectRatio: '16:9',
   prompt: '무대 위 퍼포먼스', seed: 42, conditioningStrength: 0.7,
   cast: [{
     identityId: 'id-a', profileId: 'p-a', slotIndex: 0, appearance: {},
@@ -158,7 +158,7 @@ describe('Higgsfield 어댑터 — reference-to-video 요청 본문', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).duration).toBe('6');
   });
 
-  it('kling 경로는 정수 duration과 cfg_scale을 쓴다', async () => {
+  it('kling 경로는 정수 duration을 쓰고 신원 조건화를 뒤집어 cfg_scale로 넘긴다', async () => {
     fetchMock.mockReturnValue(ok({ status: 'queued', request_id: 'r1' }));
     const p = new HiggsfieldProvider('higgsfield-kling25-pro-i2v', {
       endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
@@ -167,7 +167,61 @@ describe('Higgsfield 어댑터 — reference-to-video 요청 본문', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.image_url).toBe('https://s3/1.jpg');   // 단수 필드
     expect(body.duration).toBe(10);                     // 정수
-    expect(body.cfg_scale).toBe(0.7);
+    // cfg_scale은 스펙상 "프롬프트 준수 강도"다. 신원 조건화 0.7은 프롬프트 준수 0.3으로 가야 한다 —
+    // 그대로 0.7을 넘기면 재생성 1단계가 조건화를 올릴수록 인물이 더 이탈한다(2026-09-16 실측).
+    expect(body.cfg_scale).toBe(0.3);
+  });
+
+  it('kling에는 신원 유지용 negative_prompt를 함께 보낸다', async () => {
+    fetchMock.mockReturnValue(ok({ status: 'queued', request_id: 'r1' }));
+    const p = new HiggsfieldProvider('higgsfield-kling25-pro-i2v', {
+      endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
+    });
+    await p.submit(req({ mode: 'i2v' }), model);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.negative_prompt).toContain('different person');
+    expect(body.negative_prompt).toContain('scene change');
+  });
+
+  it('화면 비율은 프로젝트 설정을 그대로 넘긴다 (veo3.1)', async () => {
+    fetchMock.mockReturnValue(ok({ status: 'queued', request_id: 'r1' }));
+    const p = new HiggsfieldProvider('higgsfield-veo31-reference', { endpoint: '/veo3.1/reference-to-video' });
+
+    await p.submit(req(), model);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).aspect_ratio).toBe('16:9');
+
+    fetchMock.mockClear();
+    await p.submit(req({ aspectRatio: '9:16' }), model);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).aspect_ratio).toBe('9:16');
+  });
+
+  it('kling 스펙에는 화면 비율 파라미터가 없다 — 본문에 넣지 않고 시작 이미지 비율을 따른다', async () => {
+    fetchMock.mockReturnValue(ok({ status: 'queued', request_id: 'r1' }));
+    const p = new HiggsfieldProvider('higgsfield-kling25-pro-i2v', {
+      endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
+    });
+    await p.submit(req({ mode: 'i2v', aspectRatio: '9:16' }), model);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).aspect_ratio).toBeUndefined();
+  });
+});
+
+describe('Higgsfield 어댑터 — 오류 분류 (§17)', () => {
+  it('모델 접근 불가를 콘텐츠 정책 위반으로 기록하지 않는다', () => {
+    // 2026-09-16 veo3.1 reference-to-video 실패가 CREZ-GEN-003(콘텐츠 정책)으로 남아 원인을 잘못 짚게 했다
+    expect(classifyHiggsfieldError('model_not_found')).toBe('CREZ-GEN-001');
+    expect(classifyHiggsfieldError('model_disabled')).toBe('CREZ-GEN-001');
+    // 423 model_blocked — 계정에서 막힌 모델. 재시도해도 소용없다(2026-09-18 kling 2.1 계열)
+    expect(classifyHiggsfieldError('model_blocked')).toBe('CREZ-GEN-001');
+  });
+
+  it('크레딧 부족은 quota 코드로 분류한다', () => {
+    expect(classifyHiggsfieldError('not_enough_credits')).toBe('CREZ-GEN-004');
+  });
+
+  it('실제 콘텐츠 정책 거부만 CREZ-GEN-003이고 나머지는 제공자 오류다', () => {
+    expect(classifyHiggsfieldError('nsfw content detected')).toBe('CREZ-GEN-003');
+    expect(classifyHiggsfieldError(": 'prompt' is a required property")).toBe('CREZ-GEN-002');
+    expect(classifyHiggsfieldError('internal server error')).toBe('CREZ-GEN-002');
   });
 });
 

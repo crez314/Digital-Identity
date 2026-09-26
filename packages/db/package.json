@@ -9,11 +9,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "prisma generate",
     "migrate": "prisma migrate dev",
-    "deploy": "prisma migrate deploy",
+    "deploy": "tsx prisma/deploy.ts",
     "seed": "tsx prisma/seed.ts",
+    "sync:models": "tsx prisma/sync-models.ts",
     "studio": "prisma studio"
   },
   "prisma": { "seed": "tsx prisma/seed.ts" },
-  "dependencies": { "@prisma/client": "^5.22.0", "@crez/shared": "workspace:*" },
+  "dependencies": { "@prisma/client": "^5.22.0", "@crez/shared": "workspace:*", "@crez/engine": "workspace:*" },
   "devDependencies": { "prisma": "^5.22.0", "tsx": "^4.19.2", "typescript": "^5.6.3" }
 }

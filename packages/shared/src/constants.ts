@@ -4,6 +4,44 @@
 export const MAX_GENERATION_ATTEMPT = 3;
 /** 재생성 전략 사다리 최대 단계 (§5.1, §11) */
 export const MAX_REGEN = 3;
+/**
+ * 과금 제공자(ai_model.capabilities.billable)의 QC 실패 시 자동 재생성 한도 (§11).
+ * 기본 0 — 자동 재생성은 곧 자동 과금이고, 제출한 요청은 제공자가 취소를 거부할 수 있어 되돌릴 수 없다(§12.1).
+ * 운영자가 QC 결과를 보고 수동 재생성(POST /segments/{id}/regenerate)으로만 다시 돌린다.
+ * PAID_AUTO_REGEN_LIMIT 환경변수로 올릴 수 있다.
+ */
+export const PAID_AUTO_REGEN_LIMIT = 0;
+/**
+ * 앞 구간의 마지막 프레임을 다음 구간의 시작 프레임으로 넘기는 사슬의 최대 길이 (§5.1).
+ *
+ * 컷 없이 이어지는 장면을 만들려면 이어 붙여야 하지만, 생성물의 마지막 프레임을 다시 입력으로
+ * 쓰는 일이 반복되면 색이 바래고 디테일이 뭉개지며 인물이 조금씩 흘러간다(세대 손실).
+ * 이 값에 도달하면 사슬을 끊고 원본 인물 레퍼런스에서 다시 출발한다.
+ */
+export const MAX_CHAIN_LENGTH = 3;
+
+/**
+ * 이 비용을 넘는 실행은 운영자가 상한(maxCost)을 명시해야 제출된다 (§12.1).
+ *
+ * 4분 영상은 구간 48개라 실행 한 번이 수십 건의 유료 생성을 한꺼번에 제출한다.
+ * 제출한 요청은 제공자가 취소를 거부할 수 있어 되돌릴 수 없으므로, 사후가 아니라 사전에 막는다.
+ * GENERATION_COST_CONFIRM_THRESHOLD 환경변수로 조정한다.
+ */
+export const COST_CONFIRM_THRESHOLD = 10;
+
+/**
+ * 제공자가 고정 길이만 받을 때 요청 길이를 허용 값으로 맞춘다 (§12.1).
+ *
+ * 구간 길이는 임의값이지만 kling은 5·10초, veo3.1은 4·6·8초만 받는다. 가장 가까운 값으로 맞추므로
+ * **실제 과금 길이는 구간 길이와 다르다** — 4초 구간은 5초로 올라가 25% 더 나간다.
+ * 견적과 제출이 같은 값을 써야 상한이 제 역할을 한다.
+ */
+export function snapDuration(options: readonly number[] | null | undefined, seconds: number): number {
+  const usable = (options ?? []).filter((o) => Number.isFinite(o) && o > 0);
+  if (usable.length === 0) return seconds;
+  return usable.reduce((a, b) => (Math.abs(b - seconds) < Math.abs(a - seconds) ? b : a));
+}
+
 /** 연속 NO_CHANGE 횟수가 이 값이면 즉시 MANUAL_REVIEW 승격 (§5.1) */
 export const NO_CHANGE_ESCALATION_LIMIT = 2;
 
@@ -78,6 +116,9 @@ export const storageKey = {
     `projects/${projectId}/source/${sourceVideoId}/tracks.parquet`,
   segmentOutput: (projectId: string, segmentId: string, attempt: number) =>
     `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/output.mp4`,
+  /** 앞 구간에서 뽑아 이 구간의 시작 프레임으로 넘기는 이미지 */
+  segmentChainStart: (projectId: string, segmentId: string, attempt: number) =>
+    `projects/${projectId}/segments/${segmentId}/attempt-${attempt}/chain-start.jpg`,
   segmentReference: (projectId: string, segmentId: string, referenceId: string, ext: string) =>
     `projects/${projectId}/segments/${segmentId}/references/${referenceId}.${ext}`,
   qcFrame: (projectId: string, segmentId: string, attempt: number, ms: number) =>

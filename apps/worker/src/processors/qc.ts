@@ -1,7 +1,7 @@
 import type { Job } from 'bullmq';
 import { getProfileCentroids, prisma } from '@crez/db';
 import {
-  classifyOutcome, compositeScore, detectAll, judgeMultiPerson,
+  classifyOutcome, compositeScore, detectAll, judgeEvidence, judgeMultiPerson,
   type DetectedFinding, type IdentitySeries,
 } from '@crez/engine';
 import {
@@ -9,9 +9,47 @@ import {
 } from '@crez/shared';
 import { JOB_NAME, QcThresholds, ScoreWeights, type QcJobPayload } from '@crez/contracts';
 import { ml } from '../lib/ml';
+import { autoRegenDecision, isBillable } from '../lib/regen-policy';
 import { storage } from '../lib/storage';
 import { emit } from '../lib/events';
 import { queues } from '../lib/queues';
+
+/**
+ * 대조군 크기 — 이보다 많아도 판별력은 거의 안 늘고 복호화 비용만 든다.
+ * 대조군은 "가장 가까운 남"을 찾으려는 것이라 몇 명만 있어도 바닥값이 드러난다.
+ */
+const COHORT_SIZE = 8;
+
+/**
+ * 캐스팅되지 않은 같은 조직 인물들의 얼굴 centroid를 모은다.
+ *
+ * 판정에 쓰지 않고 측정에만 쓴다 — track 할당에 넣으면 남의 인물로 배정되어 지표가 망가진다.
+ * 대조군이 없으면 빈 배열을 돌려주고, 그 경우 ML은 cohortFaceSimilarity를 null로 준다.
+ */
+async function buildCohort(
+  orgId: string,
+  castIdentityIds: string[],
+  log: ReturnType<typeof childLogger>,
+): Promise<number[][]> {
+  const others = await prisma.identity.findMany({
+    where: {
+      orgId,
+      id: { notIn: castIdentityIds },
+      profiles: { some: { status: 'ACTIVE' } },
+    },
+    select: { profiles: { where: { status: 'ACTIVE' }, orderBy: { version: 'desc' }, take: 1, select: { id: true } } },
+    take: COHORT_SIZE,
+  });
+  const profileIds = others.flatMap((o) => o.profiles.map((p) => p.id));
+  if (profileIds.length === 0) {
+    log.info('대조군으로 쓸 다른 인물이 없다 — 판별력을 같이 재지 못한다');
+    return [];
+  }
+  const centroids = await getProfileCentroids(profileIds);
+  const vecs = centroids.map((c) => c.faceCentroid).filter((v): v is number[] => !!v);
+  log.info({ cohortSize: vecs.length }, '대조군으로 판별력을 함께 잰다');
+  return vecs;
+}
 
 /**
  * qc 큐 (§8): ML 추론 호출 → 규칙 적용 → finding 생성.
@@ -27,7 +65,10 @@ export async function qcProcessor(job: Job): Promise<unknown> {
 
   const output = await prisma.generationOutput.findUnique({
     where: { id: data.outputId },
-    include: { job: { include: { segment: { include: { project: { include: { cast: true, sourceVideos: true } } } } } } },
+    include: {
+      // 모델까지 함께 읽는다 — 과금 제공자는 자동 재생성 한도가 다르다(§11)
+      job: { include: { model: true, segment: { include: { project: { include: { cast: true, sourceVideos: true } } } } } },
+    },
   });
   if (!output) throw new CrezError(ErrorCode.PRJ_NOT_FOUND, '결과물 없음', data, 404);
 
@@ -61,6 +102,15 @@ export async function qcProcessor(job: Job): Promise<unknown> {
       throw new CrezError(ErrorCode.IDN_PROFILE_NOT_ACTIVE, '참조 프로파일 centroid가 없습니다', null, 422);
     }
 
+    // 대조군 — 캐스팅되지 않은 같은 조직의 인물들. 판정에는 쓰지 않고, 같은 프레임이
+    // 남에게 몇 점을 받는지만 함께 잰다.
+    //
+    // 코사인 유사도의 절대값은 그 자체로 뜻이 없다. 자세·표정이 조금만 흐트러져도 내려가
+    // 본인 사진조차 고개를 돌리면 0.25까지 떨어진다(2026-09-21 CRZ-A009 실측).
+    // 그래서 "0.59는 낮다"고 말하려면 남이 몇 점인지를 알아야 한다 — 같은 영상이 다른
+    // 인물에게는 -0.04를 받았다. 그 차이가 실제 판별력이다.
+    const cohort = await buildCohort(project.orgId, project.cast.map((c) => c.identityId), log);
+
     const sourceVideo = project.sourceVideos[0] ?? null;
     const [scores, artifacts] = await Promise.all([
       ml.scoreQc({
@@ -68,6 +118,10 @@ export async function qcProcessor(job: Job): Promise<unknown> {
         references,
         sourceTracksKey: sourceVideo?.tracksKey ?? null,
         sampleFps: Number(process.env.QC_SAMPLE_FPS ?? 5),
+        // τ_assign은 정책이라 ruleset에서 온다 — crez-ml은 받아서 적용만 한다(§7, §9.1).
+        // 이 값을 넘기지 않으면 화면에 있는 다른 사람 track까지 캐스트 인물로 묶여 지표가 망가진다.
+        assignMinSimilarity: thresholds.assignMinSimilarity,
+        ...(cohort.length ? { cohort } : {}),
         traceId: data.traceId,
       }),
       ml.detectArtifacts({
@@ -93,7 +147,28 @@ export async function qcProcessor(job: Job): Promise<unknown> {
       };
       const score = compositeScore(metrics, weights);
       scoreByIdentity[m.identityId] = score;
-      perIdentity[m.identityId] = { ...metrics, score };
+
+      // 얼굴이 작으면 같은 사람도 유사도가 낮게 나온다. 점수와 함께 "그 점수를 믿어도 되는가"를 남긴다 —
+      // 구분하지 않으면 해상도가 낮아 생긴 낮은 점수를 인물 불일치로 오해하고,
+      // 재생성 사다리가 고칠 수 없는 것을 고치려고 돈을 쓴다(§10.1).
+      const evidence = judgeEvidence(m.medianFaceHeightPx, thresholds.minFaceHeightPx);
+      if (evidence.level !== 'OK') {
+        log.warn(
+          { identityId: m.identityId, medianFaceHeightPx: evidence.medianFaceHeightPx, score },
+          `신원 점수의 근거가 얇다 — ${evidence.note}`,
+        );
+      }
+      // 대조군 점수와 그 차이를 함께 남긴다. 유사도 절대값만으로는 "낮다"를 말할 수 없고,
+      // 나중에 합격선을 다시 정할 때도 이 기록이 있어야 데이터에서 유도할 수 있다.
+      const cohortFaceSimilarity = m.cohortFaceSimilarity ?? null;
+      perIdentity[m.identityId] = {
+        ...metrics, score,
+        medianFaceHeightPx: evidence.medianFaceHeightPx,
+        cohortFaceSimilarity,
+        identityMargin: cohortFaceSimilarity === null ? null : m.faceSimilarity - cohortFaceSimilarity,
+        evidenceLevel: evidence.level as never,
+        evidenceNote: evidence.note as never,
+      };
 
       const series: IdentitySeries = {
         identityId: m.identityId,
@@ -188,8 +263,14 @@ export async function qcProcessor(job: Job): Promise<unknown> {
     }
 
     // QC 실패 → 재생성 큐 또는 MANUAL_REVIEW (§5.1)
+    // 과금 제공자는 자동 재생성이 곧 자동 과금이므로 한도가 따로 있다 (§11, 기본 0회)
     const regenCount = await prisma.regenerationTask.count({ where: { segmentId: segment.id } });
-    if (segment.attemptCount >= MAX_REGEN || regenCount >= MAX_REGEN) {
+    const decision = autoRegenDecision({
+      billable: isBillable(output.job.model.capabilities),
+      attemptCount: segment.attemptCount,
+      regenCount,
+    });
+    if (!decision.allowed) {
       // 승격 전에 직전 재생성의 결과를 분류해 둔다. 여기서 빠뜨리면 outcome이 영원히
       // null로 남아 §11 전략별 통계와 §20 재생성 성공률 KPI가 어긋난다.
       await closeOpenRegenTask(segment.id, verdict.overallScore);
@@ -199,10 +280,16 @@ export async function qcProcessor(job: Job): Promise<unknown> {
         payload: {
           status: 'MANUAL_REVIEW', score: verdict.overallScore, qcRunId: qcRun.id,
           reasons: verdict.reasons, code: ErrorCode.QC_REGEN_LIMIT,
+          escalationReason: decision.reason, limit: decision.limit, model: output.job.model.code,
         },
         traceId: data.traceId,
       });
-      log.warn({ score: verdict.overallScore, reasons: verdict.reasons }, 'QC failed — escalated to MANUAL_REVIEW');
+      log.warn(
+        { score: verdict.overallScore, reasons: verdict.reasons, escalationReason: decision.reason, limit: decision.limit },
+        decision.reason === 'PAID_PROVIDER_LIMIT'
+          ? 'QC failed — 과금 제공자라 자동 재생성하지 않고 MANUAL_REVIEW로 올린다'
+          : 'QC failed — escalated to MANUAL_REVIEW',
+      );
       return { qcRunId: qcRun.id, passed: false, escalated: true };
     }
 

@@ -59,6 +59,9 @@ function castBlocker(identity: IdentityRow, rights: RightsRow | null | undefined
 export interface SetupConfig {
   requiredMode?: string;
   resolution?: string;
+  aspectRatio?: string;
+  /** 소리(음악·효과음)를 함께 생성할지. 없으면 켠 것으로 본다 */
+  audio?: boolean;
   preferredModel?: string;
 }
 
@@ -344,6 +347,9 @@ function SettingsEditor({ projectId, status, config }: { projectId: string; stat
   const initial: GenerationSettings = {
     requiredMode: config.requiredMode ?? 'pose-guided',
     resolution: config.resolution ?? '1080p',
+    aspectRatio: config.aspectRatio ?? '16:9',
+    // 설정이 없는 예전 프로젝트도 소리를 켠 것으로 본다(서버 기본값과 같다)
+    audio: config.audio !== false,
     preferredModel: config.preferredModel ?? null,
   };
   const [value, setValue] = useState(initial);

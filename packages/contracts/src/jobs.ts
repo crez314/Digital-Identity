@@ -13,6 +13,11 @@ export const JobBase = z.object({
 export const AssetQualityJob = JobBase.extend({
   identityId: z.string().uuid(),
   assetId: z.string().uuid(),
+  /**
+   * 이미 슬롯이 정해진 사진도 다시 분류한다(재검사 경로).
+   * 사람이 직접 지정한 슬롯은 그대로 둔다 — 자동 분류가 사람의 판단을 되돌리면 고칠 방법이 없다.
+   */
+  reclassify: z.boolean().optional(),
 });
 
 export const ProfileBuildJob = JobBase.extend({
@@ -45,6 +50,8 @@ export const GenerationJobPayload = JobBase.extend({
     })
     .optional(),
   regenerationTaskId: z.string().uuid().optional(),
+  /** 콘텐츠 정책 거부 뒤의 자동 재제출이면 그 회차(1부터). 프롬프트에 안전 문구를 덧붙인다 */
+  policyRetry: z.number().int().positive().optional(),
   /** 직전 QC 점수 — 재생성 결과 분류(IMPROVED/NO_CHANGE/WORSE)에 사용 */
   scoreBefore: z.number().nullable().optional(),
 });
@@ -89,6 +96,8 @@ export const JOB_NAME = {
   SOURCE_ANALYZE: 'source.analyze',
   GENERATION_SUBMIT: 'generation.submit',
   GENERATION_POLL: 'generation.poll',
+  /** 제공자에 제출된 생성 취소 — 로컬 상태만 바꾸면 외부 생성이 계속돼 과금된다 (§12.1) */
+  GENERATION_CANCEL: 'generation.cancel',
   QC_RUN: 'qc.run',
   REGENERATION_PLAN: 'regeneration.plan',
   MASTER_BUILD: 'master.build',

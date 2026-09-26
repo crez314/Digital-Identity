@@ -47,6 +47,12 @@ export interface ReferenceAsset {
   captureSlot: string | null;
   expression: string | null;
   quality: number | null;
+  /**
+   * 이 인물의 대표 이미지로 먼저 쓴다. image-to-video에서는 이것이 곧 시작 프레임이다.
+   * 워커가 구간마다 다른 사진을 대표로 세워 컷이 전부 같은 장면에서 시작하는 것을 막는다(§5.1).
+   * 지정이 없으면 기존대로 품질 순으로 고른다.
+   */
+  lead?: boolean;
 }
 
 /** 세그먼트 프롬프트에 붙인 참고 이미지 — 배경·의상·헤어 */
@@ -97,6 +103,10 @@ export interface GenerationRequest {
   }>;
   /** 프롬프트 참고 이미지(배경·의상·헤어). 인물 신원 레퍼런스와 함께 제공자 이미지 한도 안에서 배분된다 */
   attachments: PromptAttachment[];
+  /** 출력 화면 비율 (project.config.aspectRatio, 기본 16:9). 받지 않는 제공자는 무시하고 경고를 남긴다 */
+  aspectRatio: '16:9' | '9:16';
+  /** 제공자가 소리(음악·효과음)를 함께 만들게 할지 — 지원하지 않는 모델에는 전달되지 않는다 */
+  audio?: boolean;
   /** pose-guided 모드용 소스 트랙 키 */
   sourceVideoKey: string | null;
   sourceTracksKey: string | null;
@@ -130,6 +140,14 @@ export interface FetchResult {
 }
 
 export interface GenerationProvider {
+  /**
+   * 제공자 스토리지에 입력 파일을 올리고 제공자가 읽을 수 있는 주소를 돌려준다.
+   *
+   * 이 기능이 있으면 우리 스토리지를 인터넷에 공개할 필요가 없다 — 공개 주소(터널)는 끊기면
+   * 생성이 통째로 실패하는 단일 장애점이었다. 지원하지 않는 제공자는 이 메서드를 두지 않는다.
+   */
+  uploadAsset?(body: Uint8Array, contentType: string): Promise<string>;
+
   readonly code: string;
   /** 이 제공자에 넘길 이미지와 빠지는 첨부를 계산한다. submit이 쓰는 것과 같은 결과여야 한다 */
   planImages(req: GenerationRequest): ImagePlan;

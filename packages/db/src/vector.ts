@@ -1,21 +1,15 @@
 import { Prisma } from '@prisma/client';
+import { BODY_EMBEDDING_DIM, FACE_EMBEDDING_DIM } from '@crez/shared';
 import { prisma } from './client';
+import { decryptVector, encryptVector } from './biometric';
 
 /**
- * pgvector 컬럼 접근 헬퍼.
- * Prisma가 vector 타입을 매핑하지 못하므로 raw SQL로 읽고 쓴다(§4 주석).
+ * 생체 벡터(임베딩·centroid) 접근 헬퍼.
+ * 벡터는 biometric.ts로 암호화해 bytea 컬럼에 저장한다(§16, ADR 0003). 스키마에는 Unsupported("bytea")로
+ * 선언해 Prisma 기본 조회 결과에 암호문이 섞이지 않게 하고, 읽기/쓰기는 이 파일의 raw SQL로만 한다.
  */
 
-export function toVectorLiteral(v: number[]): string {
-  return `[${v.map((n) => (Number.isFinite(n) ? n : 0)).join(',')}]`;
-}
-
-export function parseVectorLiteral(s: string | null): number[] | null {
-  if (!s) return null;
-  return s.replace(/^\[|\]$/g, '').split(',').filter(Boolean).map(Number);
-}
-
-/** §4.2 identity_embedding.vector는 vector(512) 고정이고 실제 차원은 dim 컬럼에 둔다. */
+/** §4.2 임베딩 저장 차원. 암호화 이전 vector(512) 컬럼의 규칙을 유지해 조회 결과가 달라지지 않게 한다(ADR 0002). */
 export const EMBEDDING_STORAGE_DIM = 512;
 
 /**
@@ -29,6 +23,11 @@ export function toStorageVector(v: number[], storageDim = EMBEDDING_STORAGE_DIM)
   return v.length === storageDim ? v : [...v, ...new Array<number>(storageDim - v.length).fill(0)];
 }
 
+/** 암호화 전에는 vector(512)·vector(256) 컬럼 타입이 차원을 강제했다. 암호문은 그러지 못하므로 여기서 막는다. */
+function assertDim(v: number[], dim: number, what: string): void {
+  if (v.length !== dim) throw new Error(`${what} 차원이 ${v.length}입니다 — ${dim}이어야 합니다`);
+}
+
 export async function insertEmbedding(input: {
   id: string;
   identityId: string;
@@ -40,13 +39,14 @@ export async function insertEmbedding(input: {
   vector: number[];
   quality: number | null;
 }): Promise<void> {
+  const vectorEnc = encryptVector(toStorageVector(input.vector), 'identity_embedding.vector', input.id);
   await prisma.$executeRaw`
     INSERT INTO identity_embedding
-      (id, identity_id, asset_id, kind, model_name, model_version, dim, vector, quality, created_at)
+      (id, identity_id, asset_id, kind, model_name, model_version, dim, vector_enc, quality, created_at)
     VALUES (
       ${input.id}::uuid, ${input.identityId}::uuid,
       ${input.assetId}::uuid, ${input.kind}, ${input.modelName}, ${input.modelVersion},
-      ${input.dim}, ${toVectorLiteral(toStorageVector(input.vector))}::vector, ${input.quality}, now()
+      ${input.dim}, ${vectorEnc}, ${input.quality}, now()
     )`;
 }
 
@@ -60,9 +60,9 @@ export async function listEmbeddings(
   kind: 'FACE' | 'BODY',
 ): Promise<Array<{ id: string; assetId: string | null; vector: number[]; quality: number | null; modelName: string; modelVersion: string }>> {
   const rows = await prisma.$queryRaw<
-    Array<{ id: string; asset_id: string | null; vector: string; dim: number; quality: string | null; model_name: string; model_version: string }>
+    Array<{ id: string; asset_id: string | null; vector_enc: Buffer; dim: number; quality: string | null; model_name: string; model_version: string }>
   >`
-    SELECT e.id, e.asset_id, e.vector::text AS vector, e.dim, e.quality::text AS quality,
+    SELECT e.id, e.asset_id, e.vector_enc, e.dim, e.quality::text AS quality,
            e.model_name, e.model_version
     FROM identity_embedding e
     JOIN identity_asset a ON a.id = e.asset_id
@@ -70,8 +70,8 @@ export async function listEmbeddings(
   return rows.map((r) => ({
     id: r.id,
     assetId: r.asset_id,
-    // 저장 패딩을 걷어내 원래 차원으로 돌려준다 — 신체 centroid 컬럼이 vector(256)이다.
-    vector: (parseVectorLiteral(r.vector) ?? []).slice(0, r.dim),
+    // 저장 패딩을 걷어내 원래 차원으로 돌려준다 — 신체 centroid는 256차원이다.
+    vector: decryptVector(r.vector_enc, 'identity_embedding.vector', r.id).slice(0, r.dim),
     quality: r.quality === null ? null : Number(r.quality),
     modelName: r.model_name,
     modelVersion: r.model_version,
@@ -83,10 +83,13 @@ export async function setProfileCentroids(
   faceCentroid: number[] | null,
   bodyCentroid: number[] | null,
 ): Promise<void> {
+  if (faceCentroid) assertDim(faceCentroid, FACE_EMBEDDING_DIM, 'face centroid');
+  if (bodyCentroid) assertDim(bodyCentroid, BODY_EMBEDDING_DIM, 'body centroid');
+  const faceEnc = faceCentroid ? encryptVector(faceCentroid, 'identity_profile.face_centroid', profileId) : null;
+  const bodyEnc = bodyCentroid ? encryptVector(bodyCentroid, 'identity_profile.body_centroid', profileId) : null;
   await prisma.$executeRaw`
     UPDATE identity_profile
-    SET face_centroid = ${faceCentroid ? toVectorLiteral(faceCentroid) : null}::vector,
-        body_centroid = ${bodyCentroid ? toVectorLiteral(bodyCentroid) : null}::vector
+    SET face_centroid_enc = ${faceEnc}, body_centroid_enc = ${bodyEnc}
     WHERE id = ${profileId}::uuid`;
 }
 
@@ -95,22 +98,38 @@ export async function getProfileCentroids(
 ): Promise<Array<{ id: string; identityId: string; faceCentroid: number[] | null; bodyCentroid: number[] | null }>> {
   if (profileIds.length === 0) return [];
   const rows = await prisma.$queryRaw<
-    Array<{ id: string; identity_id: string; face: string | null; body: string | null }>
+    Array<{ id: string; identity_id: string; face: Buffer | null; body: Buffer | null }>
   >`
-    SELECT id, identity_id, face_centroid::text AS face, body_centroid::text AS body
+    SELECT id, identity_id, face_centroid_enc AS face, body_centroid_enc AS body
     FROM identity_profile
     WHERE id IN (${Prisma.join(profileIds.map((p) => Prisma.sql`${p}::uuid`))})`;
   return rows.map((r) => ({
     id: r.id,
     identityId: r.identity_id,
-    faceCentroid: parseVectorLiteral(r.face),
-    bodyCentroid: parseVectorLiteral(r.body),
+    faceCentroid: r.face ? decryptVector(r.face, 'identity_profile.face_centroid', r.id) : null,
+    bodyCentroid: r.body ? decryptVector(r.body, 'identity_profile.body_centroid', r.id) : null,
+  }));
+}
+
+/** source_track의 암호문도 프로파일과 같은 경로로 복호화한다. */
+export async function getSourceTrackCentroids(sourceVideoId: string) {
+  const rows = await prisma.$queryRaw<Array<{
+    id: string; track_index: number; face: Buffer | null; quality: string | null;
+  }>>`
+    SELECT id, track_index, face_centroid_enc AS face, quality::text AS quality
+    FROM source_track WHERE source_video_id = ${sourceVideoId}::uuid ORDER BY track_index`;
+  return rows.map((r) => ({
+    id: r.id, trackIndex: r.track_index,
+    faceCentroid: r.face ? decryptVector(r.face, 'source_track.face_centroid', r.id) : null,
+    quality: r.quality === null ? null : Number(r.quality),
   }));
 }
 
 export async function setSourceTrackCentroid(trackId: string, centroid: number[] | null): Promise<void> {
+  if (centroid) assertDim(centroid, FACE_EMBEDDING_DIM, 'source track face centroid');
+  const enc = centroid ? encryptVector(centroid, 'source_track.face_centroid', trackId) : null;
   await prisma.$executeRaw`
-    UPDATE source_track SET face_centroid = ${centroid ? toVectorLiteral(centroid) : null}::vector
+    UPDATE source_track SET face_centroid_enc = ${enc}
     WHERE id = ${trackId}::uuid`;
 }
 

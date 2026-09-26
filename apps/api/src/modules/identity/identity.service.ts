@@ -20,6 +20,15 @@ const PENDING_CHECK = {
 } satisfies Prisma.IdentityAssetUpdateInput;
 
 /**
+ * 슬롯을 다룰 수 있는 자산 종류.
+ *
+ * UNSORTED는 자동 분류가 각도·구도를 판단하지 못해 사람이 슬롯을 정해 줘야 하는 사진이다(§8.1 확장).
+ * 썸네일 발급·슬롯 이동·재검사가 모두 이 목록을 써야 구제 경로가 끊기지 않는다 —
+ * 하나라도 빠지면 화면에는 "슬롯을 지정하세요"라고 띄워 놓고 지정할 수단이 없는 상태가 된다.
+ */
+const SLOTTABLE_ASSET_TYPES = ['FACE_IMAGE', 'BODY_IMAGE', 'UNSORTED'];
+
+/**
  * 워커가 판정한 자산인지 — 사용자가 직접 뺀 자산은 재검사로 되살리지 않는다.
  * reject_reason 도입 전에 제외된 자산은 사유가 없으므로 점수로 구분한다(자동 제외는 0점 또는 하한 미달).
  */
@@ -244,7 +253,7 @@ export class IdentityService {
         qualityDetail: (a.qualityDetail as Record<string, unknown> | null) ?? null,
         // checksum이 'pending'이면 업로드 URL만 발급되고 객체는 아직 없다.
         previewUrl:
-          a.checksum !== 'pending' && (a.assetType === 'FACE_IMAGE' || a.assetType === 'BODY_IMAGE')
+          a.checksum !== 'pending' && SLOTTABLE_ASSET_TYPES.includes(a.assetType)
             ? (await this.s3.presignGet(a.storageKey)).url
             : null,
       }))),
@@ -330,14 +339,21 @@ export class IdentityService {
     }
 
     const assets = await this.prisma.identityAsset.findMany({
-      where: { identityId, assetType: { in: ['FACE_IMAGE', 'BODY_IMAGE'] }, checksum: { not: 'pending' } },
+      // UNSORTED도 포함한다 — 분류에 실패한 사진을 기준이 바뀐 뒤 다시 시도할 수 있어야 한다
+      where: { identityId, assetType: { in: SLOTTABLE_ASSET_TYPES }, checksum: { not: 'pending' } },
     });
     const targets = assets.filter((a) => isAutoJudged(a));
 
     for (const a of targets) {
-      await this.prisma.identityAsset.update({ where: { id: a.id }, data: PENDING_CHECK });
+      const manualSlot = (a.qualityDetail as { manualSlot?: boolean } | null)?.manualSlot === true;
+      await this.prisma.identityAsset.update({
+        where: { id: a.id },
+        // 사람이 정한 슬롯이라는 표시는 살려 둔다 — 재분류가 그 판단을 되돌리면 안 된다
+        data: { ...PENDING_CHECK, ...(manualSlot ? { qualityDetail: { manualSlot: true } } : {}) },
+      });
+      // 재검사는 판정만이 아니라 슬롯도 다시 본다 — 한 슬롯에 몰아 올린 사진이 제자리를 찾아간다
       await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
-        traceId, orgId: user.orgId, identityId, assetId: a.id,
+        traceId, orgId: user.orgId, identityId, assetId: a.id, reclassify: true,
       });
     }
 
@@ -346,6 +362,63 @@ export class IdentityService {
       payload: { assetIds: targets.map((a) => a.id), policy: ASSET_QUALITY_POLICY }, traceId,
     });
     return { queued: targets.length, skipped: assets.length - targets.length, traceId };
+  }
+
+  /**
+   * §6.1 PATCH /identities/{id}/assets/{assetId} — 사진을 다른 캡처 슬롯으로 옮긴다.
+   *
+   * 올릴 때 슬롯을 잘못 고르는 일은 흔하다(측면 사진을 정면 칸에 올리는 식).
+   * 지우고 다시 올리게 하면 업로드를 반복해야 하므로 옮길 수 있게 한다.
+   *
+   * 슬롯마다 적합성 기준이 다르므로(§8.1) 옮긴 뒤 반드시 다시 판정한다 —
+   * 옮기기만 하면 "충족"으로 표시되는데 실제로는 엉뚱한 사진으로 프로파일이 빌드된다.
+   */
+  async moveAssetSlot(
+    user: AuthUser, identityId: string, assetId: string, captureSlot: string, traceId: string,
+  ) {
+    const identity = await this.prisma.identity.findFirst({ where: { id: identityId, orgId: user.orgId } });
+    if (!identity) throw new CrezError(ErrorCode.IDN_NOT_FOUND, undefined, { identityId }, 404);
+
+    const asset = await this.prisma.identityAsset.findFirst({ where: { id: assetId, identityId } });
+    if (!asset) throw new CrezError(ErrorCode.IDN_NOT_FOUND, '자산을 찾을 수 없음', { assetId }, 404);
+    if (!SLOTTABLE_ASSET_TYPES.includes(asset.assetType)) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '이미지 자산만 슬롯을 옮길 수 있습니다', { assetId }, 422);
+    }
+    if (asset.checksum === 'pending') {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '업로드가 끝나지 않은 사진은 옮길 수 없습니다', { assetId }, 409);
+    }
+
+    // 빌드는 그 시점의 사용 가능 자산을 읽는다. 중간에 슬롯이 바뀌면 결과가 섞인다.
+    const building = await this.prisma.identityProfile.count({ where: { identityId, status: 'BUILDING' } });
+    if (building > 0) {
+      throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '프로파일 빌드 중에는 슬롯을 옮길 수 없습니다', null, 409);
+    }
+
+    if (asset.captureSlot === captureSlot) return { id: assetId, captureSlot, requeued: false };
+
+    // 얼굴 슬롯과 전신 슬롯은 자산 종류도 함께 바뀐다 — 판정이 보는 기준이 달라지기 때문이다
+    const assetType = captureSlot.startsWith('BODY_') ? 'BODY_IMAGE' : 'FACE_IMAGE';
+
+    await this.prisma.identityAsset.update({
+      where: { id: assetId },
+      // manualSlot: 사람이 정한 슬롯이라는 표시. 재검사의 자동 재분류가 이 사진은 건드리지 않는다 —
+      // 자동 분류가 사람의 판단을 되돌리면 고쳐 놓을 방법이 없다.
+      data: { captureSlot, assetType, ...PENDING_CHECK, qualityDetail: { manualSlot: true } },
+    });
+    await this.queue.add(QUEUE.INGEST, JOB_NAME.ASSET_QUALITY, {
+      traceId, orgId: user.orgId, identityId, assetId,
+    });
+
+    await this.audit.record({
+      orgId: user.orgId, actorId: user.id, action: 'ASSET_RECHECKED', identityId,
+      payload: {
+        event: 'SLOT_MOVED', assetId,
+        before: { captureSlot: asset.captureSlot, assetType: asset.assetType },
+        after: { captureSlot, assetType },
+      },
+      traceId,
+    });
+    return { id: assetId, captureSlot, assetType, requeued: true };
   }
 
   /** 프로파일 신규 버전 빌드 요청 → jobId 반환 (§6.1) */

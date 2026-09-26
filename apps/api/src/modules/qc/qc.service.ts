@@ -9,6 +9,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { EventsService } from '../../common/events/events.service';
 import { S3Service } from '../../common/storage/s3.service';
 import type { AuthUser } from '../../common/auth/auth.types';
+import { GenerationService } from '../project/generation.service';
 import { ProjectService } from '../project/project.service';
 
 @Injectable()
@@ -20,6 +21,7 @@ export class QcService {
     private readonly events: EventsService,
     private readonly s3: S3Service,
     private readonly projects: ProjectService,
+    private readonly generation: GenerationService,
   ) {}
 
   /** §6.4 GET /segments/{id}/qc-runs — QC 이력 */
@@ -150,6 +152,8 @@ export class QcService {
       ]);
       throw new CrezError(ErrorCode.QC_REGEN_LIMIT, decision.strategy.rationale, { maxRegen: MAX_REGEN }, 409);
     }
+
+    await this.generation.assertRegenerationBudget(user, segment.project, segment);
 
     const task = await this.prisma.regenerationTask.create({
       data: {

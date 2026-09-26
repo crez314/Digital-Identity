@@ -25,6 +25,7 @@ import cv2
 import numpy as np
 
 from .base import BodyEncoder, EncodeResult, EncoderInfo, LicenseTrack
+from ..services.imaging import scaled_blur_score
 
 # 세로 밴드 경계 (비율). 머리 / 상의 / 하의 / 다리
 BANDS = ((0.00, 0.20), (0.20, 0.50), (0.50, 0.72), (0.72, 1.00))
@@ -107,10 +108,11 @@ class AppearanceBodyEncoder(BodyEncoder):
             padded[:v.size] = v
             v = padded
 
-        # 선명도로 품질을 매긴다 — 흐린 crop의 색분포는 신뢰도가 낮다
+        # 선명도로 품질을 매긴다 — 흐린 crop의 색분포는 신뢰도가 낮다.
+        # 재기 전에 크기를 맞춘다. 원본 해상도로 재면 화소가 많을수록 점수가 낮아져
+        # 최신 휴대폰으로 찍은 선명한 전신 사진이 오히려 걸러진다(scaled_blur_score 참고).
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        quality = float(min(1.0, sharp / 300.0))
+        quality = scaled_blur_score(gray)
 
         return EncodeResult(
             ok=True, vector=self.l2_normalize(v), quality=quality,

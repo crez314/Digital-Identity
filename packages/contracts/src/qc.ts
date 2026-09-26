@@ -47,6 +47,25 @@ export const QcThresholds = z.object({
   trackLostMinDurationSec: z.number(),
   /** 프레임 유효성 판정 최소 품질 */
   minFrameQuality: z.number(),
+  /**
+   * §9.1 τ_assign — track을 캐스트 인물로 인정하는 최소 유사도.
+   * 이 값을 넘지 못한 track은 "다른 사람"이며 그 인물의 지표에 섞이면 안 된다.
+   * 기존 ruleset 행에는 없는 값이라 기본값을 둔다.
+   */
+  assignMinSimilarity: z.number().default(0.35),
+  /**
+   * 구간(컷) 사이 인물 점수 편차 허용치. maxSpread가 "한 컷 안 캐스트 인물 간" 편차인 것과 달리,
+   * 이 값은 "같은 인물의 컷 간" 편차다 — 컷마다 합격해도 이어 붙이면 사람이 바뀐 것처럼 보이는 경우를 막는다.
+   */
+  sequenceMaxSpread: z.number().default(0.15),
+  /**
+   * 얼굴 유사도를 신뢰할 수 있는 최소 얼굴 픽셀 높이.
+   *
+   * 얼굴이 작으면 임베딩이 흐려져 같은 사람도 유사도가 낮게 나온다. 실측(2026-09-18, 동일 인물·동일 레퍼런스):
+   * 84px → 0.504, 87px → 0.443, 113px → 0.556, 140px → 0.711.
+   * 이 값 미만이면 점수를 "닮지 않았다"로 읽으면 안 된다 — 판정 근거가 얇다는 뜻이다.
+   */
+  minFaceHeightPx: z.number().default(110),
 });
 
 export const RulesetDto = z.object({
@@ -123,6 +142,11 @@ export const AcceptSegmentRequest = z.object({
 export const CreateMasterRequest = z.object({
   normalizeColor: z.boolean().default(true),
   normalizeTiming: z.boolean().default(true),
+  /**
+   * 구간 간 인물 편차 검사를 건너뛴다. 운영자가 결과를 눈으로 확인하고 그래도 묶겠다고
+   * 판단한 경우에만 쓴다 — 감사 기록에 남는다(§14.2).
+   */
+  ignoreSequenceCheck: z.boolean().default(false),
 });
 
 export const CreateDerivativesRequest = z.object({

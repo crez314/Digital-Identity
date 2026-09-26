@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { planImages } from '../image-plan';
 import type { GenerationRequest, PromptAttachment } from '../types';
 
-const person = (id: string, slotIndex: number, faces: number) => ({
+const person = (id: string, slotIndex: number, faces: number, leadIndex = -1) => ({
   identityId: id, profileId: `p-${id}`, slotIndex, appearance: {},
   references: Array.from({ length: faces }, (_, i) => ({
     identityId: id, assetId: `${id}${i + 1}`, storageKey: 'k', signedUrl: `https://s3/${id}${i + 1}.jpg`,
-    captureSlot: null, expression: null, quality: 1 - i * 0.1,
+    captureSlot: null, expression: null, quality: 1 - i * 0.1, lead: i === leadIndex,
   })),
 });
 const ref = (referenceId: string, kind: PromptAttachment['kind'], slotIndex: number | null, signed = true): PromptAttachment => ({
@@ -52,5 +52,43 @@ describe('제공자 이미지 배분', () => {
     const plan = planImages(request([person('A', 0, 1)], [ref('broken', 'HAIR', 0, false)]), 3);
     expect(urls(plan)).toEqual(['A1']);
     expect(plan.droppedReferenceIds).toEqual(['broken']);
+  });
+});
+
+describe('구간별 대표 이미지', () => {
+  it('워커가 지정한 대표가 품질 1위를 제치고 시작 프레임이 된다', () => {
+    // image-to-video는 첫 이미지가 곧 시작 프레임이다. 대표를 돌리지 못하면
+    // 1분 영상의 컷 12개가 전부 같은 사진에서 출발한다.
+    const r = planImages(request([person('a', 0, 4, 2)]), 1);
+    expect(urls(r)).toEqual(['a3']);
+  });
+
+  it('대표 지정이 없으면 기존대로 품질 순이다', () => {
+    const r = planImages(request([person('a', 0, 4)]), 1);
+    expect(urls(r)).toEqual(['a1']);
+  });
+
+  it('대표를 세워도 나머지 사진은 품질 순으로 뒤를 채운다', () => {
+    const r = planImages(request([person('a', 0, 4, 3)]), 3);
+    expect(urls(r)).toEqual(['a4', 'a1', 'a2']);
+  });
+});
+
+/**
+ * 종류 정렬은 모르는 값에 부딪혀도 망가지면 안 된다.
+ *
+ * KIND_ORDER를 직접 인덱싱하면 새 종류에서 undefined가 나오고 뺄셈이 NaN이 된다.
+ * NaN 비교자는 예외를 던지지 않고 "정렬은 했는데 순서는 아무거나"인 상태를 만들어,
+ * 기존 의상·헤어·배경 배치까지 조용히 흐트러진다.
+ */
+describe('모르는 첨부 종류', () => {
+  it('알려진 종류의 상대 순서는 그대로 유지된다', () => {
+    const unknown = { ...ref('X', 'OUTFIT', null), kind: 'FUTURE_KIND' } as unknown as PromptAttachment;
+    const plan = planImages(
+      request([person('A', 0, 1)], [ref('bg', 'BACKGROUND', null), unknown, ref('fit', 'OUTFIT', 0)]),
+      4,
+    );
+    // 얼굴 먼저, 그다음 의상 → 배경. 모르는 종류는 맨 뒤로 밀린다.
+    expect(urls(plan)).toEqual(['A1', 'fit', 'bg', 'X']);
   });
 });

@@ -5,7 +5,8 @@
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { encryptField } from '../src/crypto';
-import { toVectorLiteral } from '../src/vector';
+import { setProfileCentroids } from '../src/vector';
+import { syncHiggsfieldModels } from './higgsfield-models';
 
 const prisma = new PrismaClient();
 
@@ -98,10 +99,7 @@ async function main() {
 
     const face = pseudoVector(`${code}-face`, 512);
     const body = pseudoVector(`${code}-body`, 256);
-    await prisma.$executeRawUnsafe(
-      `UPDATE identity_profile SET face_centroid = $1::vector, body_centroid = $2::vector WHERE id = $3::uuid`,
-      toVectorLiteral(face), toVectorLiteral(body), profile.id,
-    );
+    await setProfileCentroids(profile.id, face, body);
 
     // 권리 정보 — 시드 인물은 MV/SHORTS 국내 상업 이용 허용 (§14.1)
     await prisma.identityRights.create({
@@ -156,65 +154,19 @@ async function main() {
     });
   }
 
-  // ── Higgsfield 실제 모델 (공식 OpenAPI v2.0.0 기준) ────
-  // 능력값은 스펙에서 그대로 옮겼다. costPerSecond는 계약 단가가 확정되면 갱신해야 한다.
-  const higgsfield = [
-    {
-      code: 'higgsfield-veo31-reference',
-      provider: 'EXTERNAL_API',
-      endpoint: '/veo3.1/reference-to-video',
-      // 레퍼런스 이미지 1~3장으로 신원을 조건화한다 — CREZ Identity conditioning의 실제 경로
-      capabilities: { maxDurationMs: 8000, maxPersons: 3, modes: ['reference'], maxResolution: 1080,
-                      durations: [4, 6, 8], endpoint: '/veo3.1/reference-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.4,
-    },
-    {
-      code: 'higgsfield-veo31-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/veo3.1/image-to-video',
-      capabilities: { maxDurationMs: 8000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
-                      durations: [4, 6, 8], endpoint: '/veo3.1/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.3,
-    },
-    {
-      code: 'higgsfield-kling25-pro-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
-      capabilities: { maxDurationMs: 10000, maxPersons: 1, modes: ['i2v'], maxResolution: 1080,
-                      durations: [5, 10], endpoint: '/kling-video/v2.5-turbo/pro/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.25,
-    },
-    {
-      code: 'higgsfield-sora2-i2v',
-      provider: 'EXTERNAL_API',
-      endpoint: '/sora-2/image-to-video',
-      capabilities: { maxDurationMs: 12000, maxPersons: 1, modes: ['i2v'], maxResolution: 720,
-                      durations: [4, 8, 12], endpoint: '/sora-2/image-to-video',
-                      pricingSource: '미확정 — 계약 단가 확인 후 갱신' },
-      costPerSecond: 0.35,
-    },
-  ];
-  for (const m of higgsfield) {
-    await prisma.aiModel.upsert({
-      where: { code: m.code },
-      update: { capabilities: m.capabilities as never, endpoint: m.endpoint, costPerSecond: m.costPerSecond },
-      // 자격증명이 없으면 제출이 실패하므로 기본은 DISABLED로 둔다.
-      // 키를 넣고 PATCH /models/{code}/status 로 ACTIVE 전환한다.
-      create: { ...m, capabilities: m.capabilities as never, status: 'DISABLED', metrics: {} } as never,
-    });
-  }
+  // ── Higgsfield 실제 모델 — 목록·상태·단가는 higgsfield-models.ts 한 곳에 둔다 ────
+  // 모델만 바꿀 때는 전체 시드 대신 `pnpm --filter @crez/db sync:models`를 쓴다.
+  await syncHiggsfieldModels(prisma);
 
   // ── §10 QC ruleset v1 — 초기 가중치는 기획 초안 제안값 ──
+  // v2가 활성이므로 v1은 비활성으로 남긴다(이력 재현용).
   await prisma.qcRuleset.upsert({
     where: { version: 'qc-v1' },
-    update: {},
+    update: { isActive: false },
     create: {
       version: 'qc-v1',
-      isActive: true,
-      note: '기획 초안 제안 가중치 (Face 45 / Body 20 / Temporal 20 / Binding 10 / Motion 5). Phase 2 검증셋으로 재조정 예정.',
+      isActive: false,
+      note: '기획 초안 제안 가중치 (Face 45 / Body 20 / Temporal 20 / Binding 10 / Motion 5). 실사 검증으로 qc-v2에 자리를 넘김.',
       weights: { face: 0.45, body: 0.2, temporal: 0.2, binding: 0.1, motion: 0.05 },
       thresholds: {
         perIdentityMin: 0.85,      // §20 Multi-Person 목표
@@ -228,8 +180,61 @@ async function main() {
         flickerZScore: 2.5,
         trackLostMinDurationSec: 0.5,
         minFrameQuality: 0.35,
+        assignMinSimilarity: 0.35,
       },
     },
+  });
+
+  // ── §10 QC ruleset v2 — 실사 생성 실측으로 재보정한 합격선 ──
+  //
+  // v1의 0.85/0.9는 mock 응답(얼굴·시간 일관성 0.93대)에 맞춰진 값이라 실제 생성물은 넘을 수 없었다.
+  // 2026-09-16 kling v2.5 turbo pro 실측(5초, 캐스트 1명):
+  //   · 인물이 끝까지 유지된 영상 : 얼굴 0.711 / 신체 0.761 / 시간 0.511 / binding 0.911 → 종합 0.700
+  //   · 1.9초에 인물이 교체된 영상 : 얼굴 0.643 / 시간 0.386 / binding 0.372          → 종합 0.53 부근
+  // 두 사례를 가르는 신호는 binding(인물이 화면에 남아 있는 비율)이며, 그 사이를 자르는 값으로 잡았다.
+  //
+  // 표본 2건짜리 잠정값이다. 검증셋이 쌓이면 qc-v3로 다시 올린다 — 임계값을 고칠 때는
+  // 행을 새로 만들고 활성만 옮긴다(qc_run.ruleset_version으로 과거 판정을 재현해야 하므로 덮어쓰지 않는다).
+  await prisma.qcRuleset.upsert({
+    where: { version: 'qc-v2' },
+    update: { isActive: true },
+    create: {
+      version: 'qc-v2',
+      isActive: true,
+      note: '실사 생성 2건 실측 기반 잠정 합격선 (구간 0.62 / 종합 0.65). 가중치는 v1 유지.',
+      weights: { face: 0.45, body: 0.2, temporal: 0.2, binding: 0.1, motion: 0.05 },
+      thresholds: {
+        perIdentityMin: 0.62,
+        maxSpread: 0.12,
+        overallMin: 0.65,
+        driftDropRatio: 0.12,
+        driftMinDurationSec: 1.0,
+        blendMargin: 0.05,
+        blendMinDurationSec: 0.6,
+        swapMinDurationSec: 0.8,
+        flickerZScore: 2.5,
+        trackLostMinDurationSec: 0.5,
+        minFrameQuality: 0.35,
+        // §9.1 τ_assign — 이 값을 넘지 못한 track은 캐스트 인물이 아니다.
+        // 넘기지 않으면 화면의 다른 사람 track까지 캐스트에 묶여 지표가 망가진다.
+        assignMinSimilarity: 0.35,
+        // 컷 사이 같은 인물의 점수 편차 허용치. 컷마다 합격해도 이어 붙이면
+        // 사람이 바뀐 것처럼 보이는 경우를 마스터 결합 직전에 막는다.
+        sequenceMaxSpread: 0.15,
+        // 얼굴이 이보다 작으면 유사도를 그대로 믿지 않는다 — 실측에서 84px 0.504, 140px 0.711로
+        // 같은 인물도 얼굴 크기에 따라 점수가 크게 달라졌다(2026-09-18)
+        minFaceHeightPx: 110,
+      },
+    },
+  });
+
+  // ── §12.1 지출 한도 ────────────────────────────────────
+  // 생성 한 번이 수십 건의 유료 요청이고 제출한 요청은 되돌릴 수 없다. 한도는 제출 전에 건다.
+  // 크레딧 단가는 계약 정보라 시드가 알 수 없다 — 비워 두고, 채우기 전까지 유료 생성을 막는다.
+  await prisma.spendPolicy.upsert({
+    where: { orgId: org.id },
+    update: {},
+    create: { orgId: org.id, monthlyBudgetKrw: 300000 },
   });
 
   // ── §12 Model Router 가중치 ────────────────────────────

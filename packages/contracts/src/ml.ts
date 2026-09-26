@@ -196,12 +196,37 @@ export const QcScoreRequest = z.object({
   /** 소스 안무 keypoint 시계열 키 — motion_consistency(DTW) 산출용. 없으면 motion=null */
   sourceTracksKey: z.string().nullable().optional(),
   sampleFps: z.number().default(5),
+  /**
+   * §9.1 τ_assign — 이 유사도를 넘지 못한 track은 캐스트 인물로 보지 않는다.
+   * 정책은 ruleset이 정하고(qc_ruleset.thresholds.assignMinSimilarity), crez-ml은 그대로 적용만 한다(§7).
+   */
+  assignMinSimilarity: z.number().default(0.35),
+  /**
+   * 대조군 — "이 인물이 아닌 사람들"의 얼굴 centroid.
+   *
+   * track 할당에는 쓰지 않는다(넣으면 track이 남의 인물로 배정되어 지표가 망가진다).
+   * 같은 프레임이 남에게 몇 점을 받는지만 함께 재기 위한 것이다. 코사인 유사도의 절대값은
+   * 그 자체로 뜻이 없다 — 자세·표정이 흐트러지면 본인 사진조차 0.25까지 내려간다.
+   * "낮다"고 말하려면 남이 몇 점인지 알아야 하고, 그 차이가 실제 판별력이다.
+   */
+  cohort: z.array(z.array(z.number())).optional(),
   traceId: z.string().optional(),
 });
 
 export const PerIdentityRawMetrics = z.object({
   identityId: z.string(),
+  /**
+   * 얼굴 픽셀 높이의 중앙값. 얼굴이 작으면 임베딩이 흐려져 유사도가 낮게 나오므로,
+   * "다른 사람"과 "너무 작아 판정할 수 없음"을 구분하려면 점수와 함께 봐야 한다(§10.1).
+   */
+  medianFaceHeightPx: z.number().nullable().optional(),
   faceSimilarity: z.number(),
+  /**
+   * 대조군이 같은 프레임에서 받은 얼굴 유사도(품질 가중). 대조군을 넘기지 않으면 null.
+   * 이 값과 faceSimilarity의 차이가 "이 영상이 그 사람인가"의 실제 판별력이다 —
+   * 판정은 하지 않는다(§2.2). 2026-09-21 실측: 본인 0.59 / 대조군 -0.04.
+   */
+  cohortFaceSimilarity: z.number().nullable().optional(),
   /** 신체 기준 벡터가 없으면 null — 상위 계층이 가중치를 재분배한다 */
   bodySimilarity: z.number().nullable(),
   temporalConsistency: z.number(),

@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import './globals.css';
 import { Providers } from './providers';
+import { StaleClientBanner } from '@/components/stale-client-banner';
 
 export const metadata: Metadata = {
   title: 'CREZ Digital Identity Content Engine',
@@ -36,6 +37,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </header>
             <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
           </div>
+          <StaleClientBanner />
         </Providers>
       </body>
     </html>

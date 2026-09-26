@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  GenerationMode, MappingMethod, ProjectStatus, ProjectType, PromptReferenceKind, SegmentStatus,
+  AspectRatio, GenerationMode, MappingMethod, ProjectStatus, ProjectType, PromptReferenceKind, SegmentStatus,
 } from './enums';
 
 /** §6.3 Project / 생성 API DTO */
@@ -11,6 +11,13 @@ export const ProjectConfig = z.object({
   outputFormat: z.enum(['mp4', 'mov']).default('mp4'),
   style: z.record(z.unknown()).default({}),
   requiredMode: GenerationMode.default('pose-guided'),
+  /** 출력 화면 비율. 미지정 시 16:9 — 받지 않는 제공자는 시작 이미지 비율을 따른다(§12.1) */
+  aspectRatio: AspectRatio.default('16:9'),
+  /**
+   * 제공자가 영상과 함께 소리(음악·효과음)를 만들게 할지. 기본 켬.
+   * 끄면 무음 영상이 나온다. 켜면 모델에 따라 초당 단가가 올라갈 수 있어 견적도 그만큼 높게 잡는다.
+   */
+  audio: z.boolean().default(true),
   /**
    * 이 프로젝트에서 반드시 쓸 모델 code. 지정하면 라우터가 점수로 다른 모델(예: mock)을 고르지 않고,
    * 이 모델이 조건을 못 맞추면 조용히 대체하지 않고 생성이 실패한다. 비우면 점수 기준 자동 선택.
@@ -30,7 +37,9 @@ export const UpdateProjectRequest = z.object({
   config: z
     .object({
       requiredMode: GenerationMode.optional(),
+      aspectRatio: AspectRatio.optional(),
       resolution: z.enum(['720p', '1080p', '2160p']).optional(),
+      audio: z.boolean().optional(),
       /** null이면 자동 선택으로 되돌린다 */
       preferredModel: z.string().min(1).nullable().optional(),
     })
@@ -132,6 +141,12 @@ export const SetScenesRequest = z.object({ scenes: z.array(SceneInput).min(1) })
 /** PATCH /projects/{id}/segments/{segmentId} — 세그먼트별 프롬프트. 비우면 씬 프롬프트를 쓴다 */
 export const UpdateSegmentRequest = z.object({
   prompt: z.string().max(4000).nullable(),
+  /**
+   * 앞 구간의 마지막 프레임에서 이어서 생성한다 — 컷 없이 이어지는 긴 장면용.
+   * 생성물을 다시 입력으로 쓰는 것이라 세대 손실이 쌓이므로, 연속 사슬은 MAX_CHAIN_LENGTH에서
+   * 끊기고 원본 인물 레퍼런스로 돌아간다. 대부분의 뮤직비디오는 2~4초마다 컷이 바뀌므로 필요 없다.
+   */
+  chainFromPrevious: z.boolean().optional(),
 });
 
 /** 참고 이미지 형식 — 제공자 API와 OpenCV가 모두 읽을 수 있는 것만 받는다 */
@@ -148,6 +163,11 @@ export const PromptReferenceUploadRequest = z
   })
   .refine((v) => v.kind !== 'BACKGROUND' || v.slotIndex == null, {
     message: '배경은 특정 위치에 속하지 않습니다', path: ['slotIndex'],
+  })
+  // 시작 프레임은 구간 전체의 첫 장면이다. 워커가 치환하는 대상이 0번 위치의 대표 레퍼런스라
+  // (image-to-video의 시작 이미지는 1장뿐이다) 다른 위치를 받으면 조용히 무시되는 값이 된다.
+  .refine((v) => v.kind !== 'START_FRAME' || v.slotIndex == null || v.slotIndex === 0, {
+    message: '시작 프레임은 구간 전체에 적용됩니다 — 위치를 지정할 수 없습니다', path: ['slotIndex'],
   });
 
 /** POST .../references/{referenceId}/confirm — 업로드 완료 확정 */
@@ -166,6 +186,11 @@ export const GenerateRequest = z.object({
   segmentIds: z.array(z.string().uuid()).optional(), // 미지정 시 PENDING 전체
   modelHint: z.string().optional(),
   priority: z.number().int().min(1).max(10).default(5),
+  /**
+   * 이번 실행에 허용하는 최대 비용. 견적이 이 값을 넘으면 아무것도 제출하지 않고 409로 돌려준다.
+   * 생략하면 COST_CONFIRM_THRESHOLD까지만 자동 진행하고, 그보다 크면 명시를 요구한다(§12.1).
+   */
+  maxCost: z.number().nonnegative().optional(),
 });
 
 export const SegmentDto = z.object({

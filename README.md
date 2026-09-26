@@ -18,7 +18,7 @@ pnpm infra:up
 
 # 스키마 · 시드 (샘플 identity 5명 + 더미 모델 어댑터 + QC ruleset)
 pnpm db:generate
-pnpm db:deploy
+pnpm db:deploy     # 생체 벡터 암호화 이행 포함 — prisma migrate deploy를 직접 쓰지 않는다
 pnpm db:seed
 
 # ML 서비스 — 실제 추론(YuNet + SFace, CPU) 또는 mock
@@ -40,6 +40,12 @@ VS Code에서는 `.vscode/launch.json`의 **"전체 스택 (api + worker + web +
 구성으로 네 프로세스를 동시에 디버깅할 수 있다.
 
 개발 인증은 `AUTH_MODE=dev`에서 `x-dev-user` 헤더로 역할을 바꿔 시험한다.
+`AUTH_MODE`는 필수다. 없거나 틀린 값이면 api가 기동하지 않고, `dev`는 `NODE_ENV=production`에서
+거부된다. 운영은 `AUTH_MODE=oidc`와 `OIDC_ISSUER`·`OIDC_AUDIENCE`를 함께 설정한다(§16).
+
+얼굴·신체 임베딩은 `BIOMETRIC_ENCRYPTION_KEY`로 암호화해 저장한다. `.env.example`의 키는 개발 전용이며
+운영에서는 기동이 거부된다 — `openssl rand -hex 32`로 발급하고 비밀 저장소에 백업한다
+([ADR 0003](docs/adr/0003-biometric-vector-encryption.md)).
 
 ```bash
 curl -H "x-dev-user: producer@hicrez.com" http://localhost:3001/api/v1/identities
@@ -190,6 +196,21 @@ curl -X PATCH -H "x-dev-user: admin@hicrez.com" -H "content-type: application/js
 | `higgsfield-kling25-pro-i2v` | `/kling-video/v2.5-turbo/pro/image-to-video` | `i2v` | 5·10초 |
 | `higgsfield-sora2-i2v` | `/sora-2/image-to-video` | `i2v` | 최대 12초 |
 
+**계정에서 실제로 열리는 모델은 다르다.** 2026-09-16 점검 기준 veo3.1 계열과 sora2는
+`model_not_found`·`model_disabled`라 시드에서 DISABLED로 둔다. 호출되는 것은 kling 계열
+(`/kling-video/v2.5-turbo/{pro,standard}/image-to-video`, `/kling-video/v2.1/{master,pro,standard}/image-to-video`)뿐이며
+이들만 ACTIVE다. veo3.1 접근이 열리면 `PATCH /models/{code}/status`로 켠다.
+`reference` 방식(레퍼런스 1~3장으로 신원 조건화)은 veo3.1에만 있으므로, kling만으로는
+시작 이미지 1장짜리 i2v만 가능하다.
+
+화면 비율은 프로젝트 설정 `config.aspectRatio`(`16:9` 기본, `9:16` 선택)로 정한다.
+kling은 비율 파라미터가 없어 시작 이미지 비율을 그대로 따르며 그 사실이 경고 로그로 남는다.
+
+QC가 실패해도 **과금 모델은 자동 재생성하지 않는다**(`PAID_AUTO_REGEN_LIMIT`, 기본 0).
+구간은 `MANUAL_REVIEW`로 올라가고 운영자가 `POST /segments/{id}/regenerate`로만 다시 돌린다.
+제출한 요청의 취소는 워커가 제공자에 전달하지만, 이미 진행 중이면 제공자가 거부할 수 있다 —
+그 경우 과금은 막지 못하고 감사 로그에 `PROVIDER_CANCEL_REFUSED`로 남는다.
+
 연동 시 주의할 제약이 셋 있다.
 
 - **pose-guided 모드가 없다.** Higgsfield는 안무 궤적을 직접 조건화하는 엔드포인트를
@@ -233,3 +254,27 @@ FFmpeg는 LGPL 빌드를 쓰고 GPL 코덱(x264/x265)은 링크하지 않는다(
 - 배포 자동화 및 워터마크 (§19 Phase 5, §22 C2PA vs 비가시 워터마크 미결정)
 - 멀티테넌시 (§19 Phase 6)
 - 생체정보 관련 법무 검토 (§22) — 라이선스와 별개로 남아 있는 사안이다.
+
+## 생성 지출 한도와 장애 복구
+
+조직의 기본 월 한도는 **300,000원**이다. `spend_policy.credit_unit_price_krw`가 비어 있으면
+유료 생성을 차단한다. 월 집계 기준은 UTC이며, 일반 생성과 수동·자동 재생성에 같은 한도를 적용한다.
+API는 큐 제출 전에 예상 비용을 예약하고 워커는 제공자 제출 직전에 다시 검사한다.
+`spend_entry`는 프로젝트 삭제와 무관하게 남는다. 미제출 취소는 예약을 해제하지만, 제공자에
+제출했거나 접수 여부가 불명확한 실패·취소는 환불을 확인하지 않았으므로 추정액을 유지한다.
+
+배포 시 API와 워커를 중지한 상태에서 `pnpm db:deploy`로 마이그레이션을 적용한 뒤 함께 재시작한다.
+기존 기본값 100,000원 중 운영자가 변경하지 않은 정책은 300,000원으로 이관하며 별도 설정은 유지한다.
+기존 생성 기록의 비용도 이관한다. 이미 삭제된 기록은 이관할 수 없다.
+
+결과 저장·생성 성공·비용 정산은 한 DB 트랜잭션으로 확정한다. QC 큐 인계와 생성 큐 인계에
+실패하면 기본 60초 주기의 reconciler가 재전달한다. 동일한 큐 작업 ID를 보존하므로 ACK 유실도
+중복 제출로 이어지지 않는다. API와 워커를 함께 업데이트해야 이 복구 경로가 작동한다.
+
+DB/큐 통합 테스트는 마이그레이션을 적용한 별도 PostgreSQL과 Redis에서 실행한다.
+테스트 DB 이름은 `_test` 또는 `_review`로 끝나야 한다. 외부 유료 생성 호출은 테스트 대역으로 대체한다.
+
+```sh
+TEST_DATABASE_URL=postgresql://crez:crez@localhost:5432/crez_test \
+TEST_REDIS_URL=redis://localhost:6379 pnpm test:integration
+```

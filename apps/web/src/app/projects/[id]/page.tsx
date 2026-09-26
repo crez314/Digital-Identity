@@ -1,16 +1,18 @@
 'use client';
 
+import { generationEstimateKey, generationRunErrors } from '@/lib/generation-state';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { del, get, patch, post } from '@/lib/api';
+import { CrezApiError, del, get, patch, post } from '@/lib/api';
 import { Badge, Button, Card, Empty, ErrorBox, Loading } from '@/components/ui';
 import { useProjectEvents } from '@/hooks/use-project-events';
 import { ProjectSetup, type SetupConfig } from '@/components/project-setup';
 import { MODE_INFO } from '@/components/generation-settings';
 import { SegmentReferences, type CastOption, type ReferenceRow } from '@/components/segment-references';
 import { SEGMENT_COLORS, ms as fmtMs, score } from '@/lib/format';
+import { RunProgress, type RunError } from '@/components/run-progress';
 
 interface SegmentRow {
   id: string;
@@ -118,6 +120,48 @@ interface CastRow {
   roleLabel: string | null;
 }
 
+/** @crez/shared MAX_GENERATION_ATTEMPT와 같은 값 (웹은 shared를 직접 쓰지 않는다) */
+const MAX_ATTEMPT = 3;
+
+interface CostEstimate {
+  segmentCount: number;
+  min: number;
+  max: number;
+  worstCase: number;
+  free: boolean;
+  pinnedModel: string | null;
+  spend?: {
+    /** 실패한 생성을 뺀 실지출 */
+    monthToDateKrw: number | null;
+    remainingKrw: number | null;
+    /** 실패까지 포함한 총량 — 한도가 따로 있다 */
+    grossMonthToDateKrw?: number | null;
+    grossRemainingKrw?: number | null;
+    blocked: boolean;
+    policy: { monthlyBudgetKrw: number | null; monthlyGrossBudgetKrw?: number | null };
+  };
+}
+
+/** 이번 달 남은 한도. 단가가 없어 막혀 있으면 그 사실을 먼저 알린다 */
+function budgetText(e: CostEstimate): string | null {
+  const s = e.spend;
+  if (!s) return null;
+  if (s.blocked) return '크레딧 단가 미설정 — 유료 생성 차단됨';
+  if (s.remainingKrw === null) return null;
+  const won = (n: number) => n.toLocaleString('ko-KR');
+  const base = `이번 달 ${won(s.monthToDateKrw ?? 0)}원 사용 · 남은 한도 ${won(s.remainingKrw)}원`;
+  // 실패한 생성은 과금되지 않아 위 금액에서 빠져 있다. 실패까지 포함한 총량은 따로 천장이 있다.
+  const failed = (s.grossMonthToDateKrw ?? 0) - (s.monthToDateKrw ?? 0);
+  if (failed <= 0 || s.grossRemainingKrw === null || s.grossRemainingKrw === undefined) return base;
+  return `${base} · 실패 포함 ${won(s.grossMonthToDateKrw ?? 0)}원(실패 ${won(failed)}원) · 실패 포함 남은 한도 ${won(s.grossRemainingKrw)}원`;
+}
+
+/** 모델이 고정돼 있으면 한 값, 아니면 구간으로 보여 준다 */
+function costText(e: CostEstimate): string {
+  const body = e.min === e.max ? `${e.max}` : `${e.min}~${e.max}`;
+  return `${body} 크레딧 (재시도까지 최대 ${e.worstCase})`;
+}
+
 interface Dashboard {
   counts: Record<string, number>;
   blockers: Array<{ id: string; segmentIndex: number; startMs: number; endMs: number; attemptCount: number }>;
@@ -142,9 +186,54 @@ export default function ProjectDetail() {
     qc.invalidateQueries({ queryKey: ['project-segments', id] });
     qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
     qc.invalidateQueries({ queryKey: ['project', id] });
+    qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
   });
 
-  const generate = useMutation({ mutationFn: () => post(`/projects/${id}/generate`, {}) });
+  // 실행 전 견적 — 4분짜리는 구간 48개라 버튼 한 번이 수십 건의 유료 생성이다(§12.1)
+  const estimate = useQuery({
+    queryKey: generationEstimateKey(id, project.data?.config, segments.data),
+    queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
+    // 구간 상태가 바뀔 때마다 키가 바뀐다. 이전 값을 들고 있지 않으면 생성이 도는 동안
+    // (구간마다 5초 간격 진행 이벤트) 견적이 계속 비어 버튼이 사실상 항상 꺼진다.
+    // 상한은 제출 직전에 다시 받아 오므로(generate) 낡은 값이 그대로 나가지는 않는다.
+    placeholderData: (prev: CostEstimate | undefined) => prev,
+    enabled: Boolean(project.data && segments.data),
+  });
+  // 이번 실행으로 큐에 넣은 구간 — 알림이 "무엇이 몇 개 도는지"를 이 기준으로 센다
+  const [run, setRun] = useState<{ ids: string[]; traceId: string } | null>(null);
+  // 닫으면 이번 실행에 대해서는 다시 뜨지 않는다 — 다음 실행에서 다시 연다
+  const [runDismissed, setRunDismissed] = useState(false);
+  const generate = useMutation({
+    // 화면에 보여 준 견적을 그대로 상한으로 올려 보낸다 — 본 것과 나가는 것이 같아야 한다
+    mutationFn: async () => {
+      // 화면에 남은 견적은 직전 상태의 값일 수 있다. 상한은 지금 상태로 다시 받아 보낸다 —
+      // 본 것과 나가는 것이 같아야 상한이 제 역할을 한다(§12.1).
+      const fresh = await qc.fetchQuery({
+        queryKey: generationEstimateKey(id, project.data?.config, segments.data),
+        queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
+      });
+      return post<{ submitted: Array<{ segmentId: string }>; traceId: string }>(
+        `/projects/${id}/generate`, { maxCost: fresh.max },
+      );
+    },
+    onError: () => qc.invalidateQueries({ queryKey: ['generate-estimate', id] }),
+    onSuccess: (res) => {
+      setRun({ ids: res.submitted.map((x) => x.segmentId), traceId: res.traceId });
+      setRunDismissed(false);
+      qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
+      qc.invalidateQueries({ queryKey: ['project-segments', id] });
+      qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
+    },
+  });
+  // 시도 한도를 다 쓴 구간은 재생성 사다리로도 못 되살린다 — 원인을 고친 뒤 되돌리는 경로
+  const resetSegment = useMutation({
+    mutationFn: (segmentId: string) => post(`/projects/${id}/segments/${segmentId}/reset`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['generate-estimate', id] });
+      qc.invalidateQueries({ queryKey: ['project-segments', id] });
+      qc.invalidateQueries({ queryKey: ['project-dashboard', id] });
+    },
+  });
   const cancel = useMutation({ mutationFn: () => post(`/projects/${id}/cancel`) });
   const master = useMutation({ mutationFn: () => post(`/projects/${id}/master`, { normalizeColor: true, normalizeTiming: true }) });
   const remove = useMutation({
@@ -162,6 +251,36 @@ export default function ProjectDetail() {
   const config = project.data?.config ?? {};
   // 삭제는 실제로 도는 작업이 있을 때만 막는다(api와 같은 기준)
   const inFlight = (dashboard.data?.counts.GENERATING ?? 0) + (dashboard.data?.counts.QC ?? 0);
+  // 실행 알림 — 이번 실행에 든 구간만 센다. 화면을 새로 열었으면(run 없음) 진행 중인 것만 보여 준다.
+  const runSegments = (segments.data ?? []).filter((s) => !run || run.ids.includes(s.id));
+  const runCount = (...st: string[]) => runSegments.filter((s) => st.includes(s.status)).length;
+  const runErrors: RunError[] = generationRunErrors(events, run);
+  // 생성 실행이 실제로 집어가는 구간 — 대기·실패이면서 시도 한도가 남은 것 (api generate와 같은 기준)
+  const waiting = (segments.data ?? []).filter((s) => ['PENDING', 'FAILED'].includes(s.status));
+  const generatable = waiting.filter((s) => s.attemptCount < MAX_ATTEMPT).length;
+  // 시도 한도를 다 쓴 구간 — 초기화해야 다시 생성할 수 있다
+  const exhausted = waiting.filter((s) => s.attemptCount >= MAX_ATTEMPT);
+
+  /**
+   * 생성 실행이 막힌 이유. 버튼만 흐려 두면 왜 못 누르는지 알 수 없어
+   * "버튼이 비활성인데 원인을 모르겠다"가 반복된다.
+   */
+  const blockedReason = generate.isPending
+    ? '생성 요청을 보내는 중입니다'
+    : status === 'DRAFT'
+    ? '생성 준비(캐스팅·구간)를 먼저 완료하세요'
+    : estimate.isError
+    ? `예상 비용을 계산하지 못했습니다 — ${estimate.error instanceof CrezApiError ? estimate.error.body.message : '설정을 확인하세요'}`
+    // 한 번이라도 받은 뒤에는 갱신 중이어도 막지 않는다 — 상한은 제출 직전에 다시 받는다
+    : !estimate.data
+    ? '예상 비용을 계산하는 중입니다'
+    : exhausted.length > 0 && generatable === 0
+    ? `구간 ${exhausted.length}개가 시도 한도(${MAX_ATTEMPT}회)를 다 썼습니다 — 초기화하면 다시 생성할 수 있습니다`
+    : generatable === 0 && (segments.data?.length ?? 0) > 0
+    ? '생성 대기 구간이 없습니다 — QC 화면에서 재생성을 요청하거나 구간을 초기화하세요'
+    : (segments.data?.length ?? 0) === 0
+    ? '구간이 없습니다'
+    : null;
   // 생성 전 단계에서만 준비 화면을 보여준다. 이후에는 캐스팅·구간을 바꿀 수 없다.
   const preparing = status === 'DRAFT' || status === 'READY';
 
@@ -190,7 +309,25 @@ export default function ProjectDetail() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {status === 'DRAFT' ? <span className="text-xs text-amber-500">생성 준비를 먼저 완료하세요</span> : null}
-          <Button onClick={() => generate.mutate()} disabled={generate.isPending || status === 'DRAFT'}>생성 실행</Button>
+          {estimate.data && !estimate.data.free && estimate.data.segmentCount > 0 ? (
+            <span className="text-xs text-neutral-600">
+              예상 비용 {costText(estimate.data)} · 구간 {estimate.data.segmentCount}개
+              {budgetText(estimate.data) ? <span className="ml-1 text-neutral-500">· {budgetText(estimate.data)}</span> : null}
+            </span>
+          ) : null}
+          {exhausted.length > 0 && generatable === 0 ? (
+            <Button
+              variant="secondary"
+              onClick={() => exhausted.forEach((s) => resetSegment.mutate(s.id))}
+              disabled={resetSegment.isPending}
+              title="시도 횟수를 0으로 되돌려 다시 생성할 수 있게 합니다 (생성 기록은 남습니다)"
+            >
+              {resetSegment.isPending ? '초기화 중…' : `시도 한도 초기화 (${exhausted.length}개)`}
+            </Button>
+          ) : null}
+          <Button onClick={() => generate.mutate()} disabled={blockedReason !== null} title={blockedReason ?? '생성을 실행합니다'}>
+            생성 실행
+          </Button>
           <Button variant="secondary" onClick={() => cancel.mutate()}>취소</Button>
           <Button variant="secondary" onClick={() => master.mutate()}>마스터 생성</Button>
           <Button variant="danger" onClick={confirmRemove} disabled={remove.isPending || inFlight > 0}>
@@ -200,9 +337,23 @@ export default function ProjectDetail() {
       </div>
       {inFlight > 0 ? (
         <p className="-mt-4 text-right text-xs text-neutral-500">생성·QC가 진행 중인 구간 {inFlight}개 — 삭제하려면 먼저 취소하세요</p>
+      ) : blockedReason ? (
+        <p className="-mt-4 text-right text-xs text-amber-600">{blockedReason}</p>
       ) : null}
 
-      <ErrorBox error={generate.error ?? cancel.error ?? master.error ?? remove.error} />
+      <ErrorBox error={generate.error ?? estimate.error ?? cancel.error ?? master.error ?? remove.error} />
+
+      {runDismissed ? null : (
+      <RunProgress
+        submitted={run ? run.ids.length : null}
+        running={runCount('GENERATING', 'QC')}
+        passed={runCount('PASSED')}
+        review={runCount('MANUAL_REVIEW')}
+        failed={runCount('FAILED')}
+        errors={runErrors}
+        onClose={() => setRunDismissed(true)}
+      />
+      )}
 
       {preparing && cast.data && segments.data ? (
         <ProjectSetup
@@ -250,11 +401,24 @@ export default function ProjectDetail() {
                     <td className="pt-3 tabular-nums">{s.attemptCount}</td>
                     <td className="pt-3 tabular-nums">{score(s.latestScore)}</td>
                     <td className="pt-3 text-right">
-                      {s.latestQcRunId ? (
-                        <Link href={`/qc-runs/${s.latestQcRunId}`} className="text-xs text-blue-600 hover:underline">
-                          QC 보기
-                        </Link>
-                      ) : null}
+                      <div className="flex items-center justify-end gap-2">
+                        {['FAILED', 'MANUAL_REVIEW'].includes(s.status) ? (
+                          <button
+                            type="button"
+                            onClick={() => resetSegment.mutate(s.id)}
+                            disabled={resetSegment.isPending}
+                            className="text-xs text-neutral-500 hover:underline disabled:opacity-40"
+                            title="시도 횟수를 0으로 되돌려 다시 생성할 수 있게 합니다 (생성 기록은 남습니다)"
+                          >
+                            초기화
+                          </button>
+                        ) : null}
+                        {s.latestQcRunId ? (
+                          <Link href={`/qc-runs/${s.latestQcRunId}`} className="text-xs text-blue-600 hover:underline">
+                            QC 보기
+                          </Link>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                   <tr>

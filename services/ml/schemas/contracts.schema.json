@@ -1420,8 +1420,20 @@
             "identityId": {
               "type": "string"
             },
+            "medianFaceHeightPx": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
             "faceSimilarity": {
               "type": "number"
+            },
+            "cohortFaceSimilarity": {
+              "type": [
+                "number",
+                "null"
+              ]
             },
             "bodySimilarity": {
               "type": [
@@ -1926,6 +1938,19 @@
               "type": "number",
               "default": 5
             },
+            "assignMinSimilarity": {
+              "type": "number",
+              "default": 0.35
+            },
+            "cohort": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
             "traceId": {
               "type": "string"
             }
@@ -1959,8 +1984,20 @@
                   "identityId": {
                     "type": "string"
                   },
+                  "medianFaceHeightPx": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
                   "faceSimilarity": {
                     "type": "number"
+                  },
+                  "cohortFaceSimilarity": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
                   },
                   "bodySimilarity": {
                     "type": [
@@ -2674,6 +2711,18 @@
             },
             "minFrameQuality": {
               "type": "number"
+            },
+            "assignMinSimilarity": {
+              "type": "number",
+              "default": 0.35
+            },
+            "sequenceMaxSpread": {
+              "type": "number",
+              "default": 0.15
+            },
+            "minFaceHeightPx": {
+              "type": "number",
+              "default": 110
             }
           },
           "required": [

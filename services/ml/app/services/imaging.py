@@ -6,9 +6,39 @@ import numpy as np
 
 
 def blur_score(gray: np.ndarray) -> float:
-    """Laplacian 분산 — 값이 클수록 선명하다. 0..1로 정규화."""
+    """
+    Laplacian 분산 — 값이 클수록 선명하다. 0..1로 정규화.
+
+    호출자가 이미 고정 크기로 줄인 이미지를 넘긴다고 가정한다. 원본 해상도 그대로 넣으면
+    해상도가 높을수록 점수가 낮아진다 — 그 용도로는 scaled_blur_score를 쓴다.
+    """
     v = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     return float(min(1.0, v / 500.0))
+
+
+#: 선명도를 재기 전에 맞추는 세로 크기. 이 값이 바뀌면 모든 자산 품질 점수가 바뀐다.
+SHARPNESS_HEIGHT = 512
+
+
+def scaled_blur_score(gray: np.ndarray, target_h: int = SHARPNESS_HEIGHT) -> float:
+    """
+    크기에 좌우되지 않는 선명도.
+
+    Laplacian 분산은 해상도에 크게 좌우된다. 같은 사진을 48MP 원본에서 재면 분산이 35,
+    세로 512로 줄여 재면 429가 나온다(2026-09-21 실측). 원본 크기로 재면 "초점이 맞았는가"가
+    아니라 "화소가 적은가"를 재게 되고, 최신 휴대폰으로 찍은 선명한 전신 사진이 품질 미달로
+    걸러진다. 실제로 4284x5712 전신 사진 2장이 0.12로 떨어져 제외됐다.
+
+    그래서 재기 전에 세로를 맞춘다. 원본이 더 작으면 늘리지 않는다 — 없는 화소를 만들어
+    선명하다고 우길 수는 없다.
+    """
+    if gray.size == 0:
+        return 0.0
+    h = gray.shape[0]
+    if h > target_h:
+        w = max(1, int(round(gray.shape[1] * target_h / h)))
+        gray = cv2.resize(gray, (w, target_h), interpolation=cv2.INTER_AREA)
+    return blur_score(gray)
 
 
 def exposure_score(gray: np.ndarray) -> float:
@@ -46,7 +76,7 @@ def quality_score(gray_crop: np.ndarray, bbox_h: float, frame_h: int, front: flo
     if gray_crop.size == 0:
         return 0.0
     return float(
-        0.35 * blur_score(gray_crop)
+        0.35 * scaled_blur_score(gray_crop)
         + 0.2 * exposure_score(gray_crop)
         + 0.25 * face_size_score(bbox_h, frame_h)
         + 0.2 * front

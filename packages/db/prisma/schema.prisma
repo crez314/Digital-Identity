@@ -1,5 +1,6 @@
 // CREZ Digital Identity Content Engine — 데이터 모델 (기술명세서 §4)
-// pgvector 컬럼은 Prisma가 네이티브 지원하지 않으므로 Unsupported 타입으로 선언하고
+// 얼굴·신체 벡터는 생체인식정보라 AES-256-GCM 암호문(bytea)으로 저장한다(§16, ADR 0003).
+// 암호문 컬럼은 Unsupported("bytea")로 선언해 Prisma 기본 조회 결과에 섞이지 않게 하고,
 // 읽기/쓰기는 raw SQL(packages/db/src/vector.ts)로 처리한다. dim 컬럼을 병행 관리해
 // 모델 교체 시 차원 변경을 추적한다(§7.2).
 
@@ -23,8 +24,51 @@ model Organization {
   users      AppUser[]
   identities Identity[]
   projects   Project[]
+  spendPolicy SpendPolicy?
 
   @@map("organization")
+}
+
+/// 조직 단위 지출 한도 (§12.1).
+/// 생성 한 번이 수십 건의 유료 요청이고 제출한 요청은 취소가 거부될 수 있어 되돌릴 수 없다.
+/// 그래서 한도는 사후 정산이 아니라 제출 전에 건다.
+model SpendPolicy {
+  orgId              String   @id @map("org_id") @db.Uuid
+  /// 월 상한(원) — 실패한 생성은 빼고 센다(실제로 나갈 돈). null이면 금액 상한 없음
+  monthlyBudgetKrw   Decimal? @default(300000) @map("monthly_budget_krw") @db.Decimal(14, 2)
+  /// 월 상한(원) — 실패한 생성까지 포함해 센다. 실패가 쏟아지는 상황을 잡는 천장
+  monthlyGrossBudgetKrw Decimal? @default(500000) @map("monthly_gross_budget_krw") @db.Decimal(14, 2)
+  /// 1 크레딧의 원화 단가. 견적은 크레딧으로 나오므로 이 값이 있어야 원화 상한을 적용할 수 있다
+  creditUnitPriceKrw Decimal? @map("credit_unit_price_krw") @db.Decimal(12, 4)
+  /// 단가를 모르는 동안 유료 생성을 막을지. 기본 true — 얼마가 나갈지 모르는 채로 돈을 쓰지 않는다
+  blockWhenUnpriced  Boolean  @default(true) @map("block_when_unpriced")
+  updatedAt          DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  updatedBy          String?  @map("updated_by") @db.Uuid
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("spend_policy")
+}
+
+/// 과금 원장. 프로젝트·구간 삭제와 무관하게 사용액을 보존한다 (의도적으로 FK 없음).
+model SpendEntry {
+  id            String   @id @default(uuid()) @db.Uuid
+  orgId         String   @map("org_id") @db.Uuid
+  projectId     String   @map("project_id") @db.Uuid
+  segmentId     String   @map("segment_id") @db.Uuid
+  attempt       Int
+  amountCredits Decimal  @map("amount_credits") @db.Decimal(14, 4)
+  status        String   @default("RESERVED") // RESERVED|SUBMITTED|SETTLED|FAILED|RELEASED
+  /// DB 확정 후 큐 장애가 나도 제출을 복구할 수 있도록 요청을 함께 저장한다.
+  dispatch      Json?
+  dispatchedAt  DateTime? @map("dispatched_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([segmentId, attempt])
+  @@index([orgId, createdAt])
+  @@index([status, dispatchedAt])
+  @@map("spend_entry")
 }
 
 model AppUser {
@@ -68,7 +112,7 @@ model Identity {
 model IdentityAsset {
   id           String   @id @default(uuid()) @db.Uuid
   identityId   String   @map("identity_id") @db.Uuid
-  assetType    String   @map("asset_type") // FACE_IMAGE|BODY_IMAGE|VIDEO|MOTION_VIDEO
+  assetType    String   @map("asset_type") // FACE_IMAGE|BODY_IMAGE|VIDEO|MOTION_VIDEO|UNSORTED(자동 분류 대기)
   captureSlot  String?  @map("capture_slot")
   expression   String?
   storageKey   String   @map("storage_key")
@@ -100,7 +144,8 @@ model IdentityEmbedding {
   modelName    String   @map("model_name")
   modelVersion String   @map("model_version")
   dim          Int
-  vector       Unsupported("vector(512)")
+  /// AES-256-GCM 암호문 (packages/db/src/biometric.ts). 평문 벡터는 저장하지 않는다
+  vectorEnc    Unsupported("bytea") @map("vector_enc")
   quality      Decimal? @db.Decimal(5, 4)
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -116,8 +161,9 @@ model IdentityProfile {
   identityId   String    @map("identity_id") @db.Uuid
   version      Int
   status       String // BUILDING|ACTIVE|ARCHIVED|FAILED
-  faceCentroid Unsupported("vector(512)")? @map("face_centroid")
-  bodyCentroid Unsupported("vector(256)")? @map("body_centroid")
+  /// 얼굴(512)·신체(256) centroid의 AES-256-GCM 암호문
+  faceCentroidEnc Unsupported("bytea")? @map("face_centroid_enc")
+  bodyCentroidEnc Unsupported("bytea")? @map("body_centroid_enc")
   faceVariance Decimal?  @map("face_variance") @db.Decimal(6, 5)
   attributes   Json      @default("{}")
   modelBundle  Json      @default("{}") @map("model_bundle")
@@ -243,7 +289,8 @@ model SourceTrack {
   startMs       Int      @map("start_ms")
   endMs         Int      @map("end_ms")
   timelineKey   String   @map("timeline_key") // bbox/keypoint 시계열 (S3 parquet)
-  faceCentroid  Unsupported("vector(512)")? @map("face_centroid")
+  /// 트랙 얼굴 centroid의 AES-256-GCM 암호문
+  faceCentroidEnc Unsupported("bytea")? @map("face_centroid_enc")
   quality       Decimal? @db.Decimal(5, 4)
 
   sourceVideo SourceVideo   @relation(fields: [sourceVideoId], references: [id], onDelete: Cascade)
@@ -299,6 +346,9 @@ model Segment {
   status           String // PENDING|GENERATING|QC|PASSED|FAILED|MANUAL_REVIEW
   /// 세그먼트별 생성 프롬프트. 비어 있으면 씬 프롬프트를 쓴다
   prompt           String?
+  /// 앞 구간의 마지막 프레임을 이 구간의 시작 프레임으로 쓴다 — 컷 없이 이어지는 긴 장면용.
+  /// 세대 손실이 누적되므로 연속 사슬은 MAX_CHAIN_LENGTH에서 끊고 원본 레퍼런스로 돌아간다(§5.1).
+  chainFromPrevious Boolean @default(false) @map("chain_from_previous")
   acceptedOutputId String? @map("accepted_output_id") @db.Uuid
   attemptCount     Int     @default(0) @map("attempt_count")
   /// 운영자 수동 승인 사유 (§14.2 감사 대상)
@@ -370,6 +420,9 @@ model GenerationJob {
   providerJobId String?   @map("provider_job_id")
   costAmount    Decimal?  @map("cost_amount") @db.Decimal(12, 4)
   startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  // 마지막으로 제공자에 상태를 물어본 시각. reconciler가 "폴링이 정말 끊겼는지"를 이걸로 판단한다 —
+  // 시작 시각만 보면 오래 걸리는 생성마다 60초에 한 번씩 폴링 체인을 새로 만들어 쌓는다(§8).
+  lastPolledAt  DateTime? @map("last_polled_at") @db.Timestamptz(6)
   finishedAt    DateTime? @map("finished_at") @db.Timestamptz(6)
   errorCode     String?   @map("error_code")
   errorDetail   Json?     @map("error_detail")
@@ -387,13 +440,19 @@ model GenerationJob {
 
 model GenerationOutput {
   id         String   @id @default(uuid()) @db.Uuid
-  jobId      String   @map("job_id") @db.Uuid
+  /// 한 시도(job)당 결과물은 하나다. 이 유일 제약이 중복 저장을 막는 잠금 역할을 한다 —
+  /// 상태를 먼저 SUCCEEDED로 바꿔 선점하면 내려받기 도중 워커가 죽었을 때
+  /// 결과물 없는 성공으로 남아 재시도·복구 스캔이 모두 건너뛴다.
+  jobId      String   @unique @map("job_id") @db.Uuid
   storageKey String   @map("storage_key")
   durationMs Int?     @map("duration_ms")
   fps        Decimal? @db.Decimal(6, 3)
   width      Int?
   height     Int?
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// QC 큐 인계 완료 시각. null이면 reconciler가 다시 인계한다.
+  qcQueuedAt DateTime? @map("qc_queued_at") @db.Timestamptz(6)
 
   job    GenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
   qcRuns QcRun[]

@@ -25,6 +25,15 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    @field_validator("ml_internal_token")
+    @classmethod
+    def _require_internal_token(cls, v: str) -> str:
+        """빈 토큰은 내부 호출 검사를 무력화한다(§1.1). 기동 단계에서 거부한다."""
+        token = v.strip()
+        if not token:
+            raise ValueError("ML_INTERNAL_TOKEN must not be empty")
+        return token
+
     @field_validator("log_level")
     @classmethod
     def _normalize_log_level(cls, v: str) -> str:

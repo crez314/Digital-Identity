@@ -31,11 +31,11 @@ export function policyRetryLimit(): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 1;
 }
 
-export type PolicyRetryReason = 'LIMIT' | 'ATTEMPTS' | 'BUDGET' | 'ERROR' | 'DISABLED';
+export type PolicyRetryReason = 'LIMIT' | 'ATTEMPTS' | 'BUDGET' | 'ERROR' | 'DISABLED' | 'ALREADY';
 
 export interface PolicyRetryPlan {
   retrying: boolean;
-  /** 이 구간에서 정책 거부로 끝난 생성 횟수(지금 실패한 건 포함) */
+  /** 이번 실행에서 정책 거부로 끝난 생성 횟수(지금 실패한 건 포함) */
   rejections: number;
   /** 재제출한 시도 번호 */
   attempt?: number;
@@ -54,8 +54,14 @@ export async function retryAfterContentPolicy(args: {
   const log = childLogger({ traceId, segmentId });
   const limit = policyRetryLimit();
 
+  // 세는 범위는 **이번 실행**이다(같은 traceId). 구간의 전체 이력으로 세면, 사람이 프롬프트를 고쳐
+  // 다시 실행해도 지난 실행의 거부가 한도를 이미 채워 버려 새 실행은 재시도 없이 바로 확정 실패한다
+  // — 2026-09-26에 실제로 그렇게 됐다.
   const rejections = await prisma.generationJob.count({
-    where: { segmentId, errorCode: ErrorCode.GEN_CONTENT_POLICY },
+    where: {
+      segmentId, errorCode: ErrorCode.GEN_CONTENT_POLICY,
+      params: { path: ['traceId'], equals: traceId },
+    },
   });
   if (limit === 0) return { retrying: false, rejections, reason: 'DISABLED' };
   // 지금 실패한 건이 이미 세어져 있다 — 거부 1회면 재제출 1회가 남아 있다는 뜻이다.
@@ -83,6 +89,13 @@ export async function retryAfterContentPolicy(args: {
           { retryReason: 'ATTEMPTS', attemptCount: segment.attemptCount }, 409);
       }
       const next = await nextGenerationAttempt(tx, segmentId, segment.attemptCount);
+      // 같은 생성에 폴링이 여러 개 붙는 일이 있다(중복 폴링 체인). 그 중 둘 이상이 같은 거부를 보고
+      // 각각 재제출하면 유료 생성이 두 번 나간다. 이미 다음 시도가 만들어졌으면 여기서 멈춘다.
+      // 조직 잠금 안이라 검사와 예약이 갈라지지 않는다.
+      if (next > failedAttempt + 1) {
+        throw new CrezError(ErrorCode.PRJ_INVALID_STATE, '다른 폴링이 이미 재제출했습니다',
+          { retryReason: 'ALREADY', next, failedAttempt }, 409);
+      }
       await reserveSpend(tx, orgId, [{
         projectId, segmentId, attempt: next, amountCredits,
         dispatch: { payload: { reason: 'POLICY_RETRY', afterAttempt: failedAttempt }, priority: 5 },

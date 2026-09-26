@@ -14,6 +14,7 @@ import { SpendService } from '../../api/src/modules/spend/spend.service';
 import { ProjectService } from '../../api/src/modules/project/project.service';
 import { QcService } from '../../api/src/modules/qc/qc.service';
 import { generationProcessor, reconcileSubmittedJobs } from '../src/processors/generation';
+import { retryAfterContentPolicy } from '../src/lib/policy-retry';
 import { finalizeGeneration } from '../src/lib/generation-finalize';
 
 const f = vi.hoisted(() => ({
@@ -435,6 +436,45 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     const errors = f.emit.mock.calls.map(([e]) => e).filter((e) => e.type === 'ERROR');
     expect(errors.at(-1).payload.detail).toContain('프롬프트');
     expect(errors.at(-1).payload.policyRetry).toMatchObject({ retrying: false, rejections: 2, reason: 'LIMIT' });
+  });
+
+  it('지난 실행의 정책 거부는 이번 실행의 재시도 한도를 쓰지 않는다', async () => {
+    // 전체 이력으로 세면, 사람이 프롬프트를 고쳐 다시 실행해도 지난 실행의 거부가 한도를 채워
+    // 새 실행이 재시도 없이 바로 확정 실패한다 — 2026-09-26에 실제로 그렇게 됐다.
+    const fx = await fixture(60000); const p = await fx.project();
+    await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 1, modelId: fx.model.id, routingTrace: {},
+      params: { traceId: 'previous-run' }, status: 'FAILED', errorCode: ErrorCode.GEN_CONTENT_POLICY,
+      startedAt: new Date(Date.now() - 600000), finishedAt: new Date(Date.now() - 590000),
+    } });
+    const job = await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 2, modelId: fx.model.id, routingTrace: {}, params: { traceId: 'this-run' },
+      status: 'RUNNING', providerJobId: `provider-${randomUUID()}`, startedAt: new Date(),
+    } });
+    await prisma.segment.update({ where: { id: p.segment.id }, data: { status: 'GENERATING', attemptCount: 1 } });
+    await prisma.spendEntry.create({ data: { orgId: fx.org.id, projectId: p.project.id,
+      segmentId: p.segment.id, attempt: 2, amountCredits: 6, status: 'SUBMITTED' } });
+    vi.spyOn(providerRegistry, 'resolve').mockReturnValue({
+      code: 'fake-paid',
+      poll: vi.fn().mockResolvedValue({
+        state: 'FAILED', errorCode: ErrorCode.GEN_CONTENT_POLICY, errorDetail: 'higgsfield: nsfw로 거부됨',
+      }),
+    } as never);
+    await generationProcessor({ name: JOB_NAME.GENERATION_POLL, data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, traceId: 'this-run',
+      generationJobId: job.id, providerJobId: job.providerJobId!, pollCount: 1,
+    } } as never);
+
+    expect((await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } })).status).toBe('GENERATING');
+    expect(f.generationAdd).toHaveBeenCalledWith(JOB_NAME.GENERATION_SUBMIT,
+      expect.objectContaining({ attempt: 3, policyRetry: 1 }), expect.anything());
+
+    // 같은 거부를 중복 폴링이 또 보고해도 재제출은 한 번뿐이다 — 아니면 유료 생성이 두 번 나간다
+    const again = await retryAfterContentPolicy({
+      segmentId: p.segment.id, projectId: p.project.id, orgId: fx.org.id, traceId: 'this-run', failedAttempt: 2,
+    });
+    expect(again).toMatchObject({ retrying: false, reason: 'ALREADY' });
+    expect(await prisma.spendEntry.count({ where: { segmentId: p.segment.id } })).toBe(2);
   });
 
   it('제공자 접수 여부가 불명확한 실패는 추정액을 남긴다', async () => {

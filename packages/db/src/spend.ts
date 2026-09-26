@@ -75,6 +75,45 @@ export async function readSpendCredits(db: SpendDb, orgId: string, now = new Dat
 }
 
 /**
+ * 제출로 이어지지 않은 채 오래 남은 예약을 푼다.
+ *
+ * 예약은 "제출 전까지 유지"가 원칙이라 월이 바뀌어도 계속 합산된다(readSpendLedger). 그래서 큐가
+ * 작업을 잃어버리거나 워커가 죽어 생긴 고아 예약은 **영구히** 한도를 깎았고, 되돌릴 수단이 없었다.
+ * 생성은 몇 분이면 끝나므로, 살아 있는 job이 없는 채로 이 시간을 넘긴 예약은 고아로 본다.
+ *
+ * 제공자에 이미 나간 예약(SUBMITTED)은 손대지 않는다 — 돈이 나갔을 수 있다.
+ */
+export async function releaseStaleReservations(
+  db: Pick<Prisma.TransactionClient, 'spendEntry' | 'generationJob'>,
+  olderThan: Date,
+  limit = 200,
+): Promise<Array<{ id: string; orgId: string; segmentId: string; attempt: number; amountCredits: number }>> {
+  const candidates = await db.spendEntry.findMany({
+    where: { status: 'RESERVED', createdAt: { lt: olderThan } },
+    orderBy: { createdAt: 'asc' }, take: limit,
+  });
+  if (candidates.length === 0) return [];
+  // 아직 돌고 있는 작업의 예약은 건드리지 않는다.
+  const live = await db.generationJob.findMany({
+    where: {
+      status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] },
+      OR: candidates.map((c) => ({ segmentId: c.segmentId, attempt: c.attempt })),
+    },
+    select: { segmentId: true, attempt: true },
+  });
+  const liveKey = new Set(live.map((j) => `${j.segmentId}:${j.attempt}`));
+  const orphans = candidates.filter((c) => !liveKey.has(`${c.segmentId}:${c.attempt}`));
+  if (orphans.length === 0) return [];
+  await db.spendEntry.updateMany({
+    where: { id: { in: orphans.map((o) => o.id) }, status: 'RESERVED' },
+    data: { status: 'RELEASED' },
+  });
+  return orphans.map((o) => ({
+    id: o.id, orgId: o.orgId, segmentId: o.segmentId, attempt: o.attempt, amountCredits: Number(o.amountCredits),
+  }));
+}
+
+/**
  * 제공자가 실패를 확정한 시도를 원장에서 실패로 표시한다 — 실지출에서는 빠지고 실패 포함 총량에는 남는다.
  * 접수 여부를 모르는 실패(제출 중 오류·폴링 timeout)에는 쓰지 않는다. 그 경우는 돈이 나갔을 수 있다.
  */

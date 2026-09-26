@@ -247,6 +247,81 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     expect(provider.submit).not.toHaveBeenCalled();
   });
 
+  it('제출되지 않은 채 오래 남은 예약은 해제되어 한도가 풀린다', async () => {
+    // 큐가 작업을 잃어버리면 예약만 남는다. 예약은 월이 바뀌어도 계속 합산되므로,
+    // 청소하지 않으면 그 조직의 한도가 영구히 잠긴다.
+    const fx = await fixture(6000); const p = await fx.project();
+    await prisma.spendEntry.create({ data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 9,
+      amountCredits: 6, status: 'RESERVED', createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+    } });
+    expect((await readSpendLedger(prisma, fx.org.id)).net).toBe(6);
+    await expect(generation.generate(fx.user, p.project.id, {}, 'locked')).rejects.toThrow(/월 한도/);
+
+    await reconcileSubmittedJobs();
+
+    expect((await readSpendLedger(prisma, fx.org.id)).net).toBe(0);
+    const entry = await prisma.spendEntry.findFirstOrThrow({ where: { segmentId: p.segment.id, attempt: 9 } });
+    expect(entry.status).toBe('RELEASED');
+    await expect(generation.generate(fx.user, p.project.id, {}, 'unlocked')).resolves.toBeTruthy();
+  });
+
+  it('아직 돌고 있는 작업의 예약은 오래돼도 해제하지 않는다', async () => {
+    const fx = await fixture(6000); const p = await fx.project();
+    await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 9, modelId: fx.model.id, routingTrace: {}, params: {},
+      status: 'RUNNING', providerJobId: `provider-${randomUUID()}`, startedAt: new Date(),
+    } });
+    await prisma.spendEntry.create({ data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 9,
+      amountCredits: 6, status: 'RESERVED', createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+    } });
+    await reconcileSubmittedJobs();
+    const entry = await prisma.spendEntry.findFirstOrThrow({ where: { segmentId: p.segment.id, attempt: 9 } });
+    expect(entry.status).toBe('RESERVED');
+  });
+
+  it('제출 결과를 기록하지 못해 멈춘 작업을 종료 상태로 내린다', async () => {
+    // 제공자는 접수했는데 그 직후 DB 쓰기가 실패하면 QUEUED·접수번호 없음으로 남는다.
+    // 재시도는 멱등성 가드에 걸려 '정상 완료'로 끝나므로 아무도 줍지 못했다.
+    const fx = await fixture(6000); const p = await fx.project();
+    const job = await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 1, modelId: fx.model.id, routingTrace: {}, params: { traceId: 'stuck' },
+      status: 'QUEUED', providerJobId: null, startedAt: new Date(Date.now() - 30 * 60 * 1000),
+    } });
+    await prisma.segment.update({ where: { id: p.segment.id }, data: { status: 'GENERATING', attemptCount: 1 } });
+    await prisma.spendEntry.create({ data: { orgId: fx.org.id, projectId: p.project.id,
+      segmentId: p.segment.id, attempt: 1, amountCredits: 6, status: 'SUBMITTED' } });
+
+    await reconcileSubmittedJobs();
+
+    const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.status).toBe('FAILED');
+    expect(String(JSON.stringify(after.errorDetail))).toContain('제출 결과를 기록하지 못했습니다');
+    // 접수 여부를 모르므로 과금은 그대로 둔다 — 과소 집계는 한도를 무력화한다
+    expect((await readSpendLedger(prisma, fx.org.id)).net).toBe(6);
+  });
+
+  it('결과를 끝내 가져오지 못하면 구간이 GENERATING에 갇히지 않는다', async () => {
+    const fx = await fixture(6000); const p = await fx.project();
+    const { job, data } = await paidJob(fx, p);
+    const provider = { code: 'fake-paid',
+      poll: vi.fn().mockResolvedValue({ state: 'SUCCEEDED', progress: 1 }),
+      fetchResult: vi.fn().mockRejectedValue(new Error('storage unreachable')) };
+    vi.spyOn(providerRegistry, 'resolve').mockReturnValue(provider as never);
+    const pollJob = { name: JOB_NAME.GENERATION_POLL, data: {
+      ...data, generationJobId: job.id, providerJobId: job.providerJobId, pollCount: 0,
+    }, attemptsMade: 4, opts: { attempts: 5 } };
+
+    const res = await generationProcessor(pollJob as never);
+
+    expect(res).toMatchObject({ failed: true });
+    const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.status).toBe('FAILED');
+    expect((await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } })).status)
+      .not.toBe('GENERATING');
+  });
+
   it('제공자가 거절한 제출은 실지출에서 빠지고 실패 포함 총량에만 남는다', async () => {
     // 콘텐츠 정책 거부·크레딧 부족·모델 차단은 제공자가 받아들이지 않은 것이라 돈이 나가지 않는다.
     // 이것까지 실지출로 세면 실제 지출이 0원인데 그 달 생성이 전면 차단된다.

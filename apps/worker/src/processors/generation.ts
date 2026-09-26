@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
 import {
-  generationDispatchId, getProfileCentroids, lockOrganizationSpend, markSpendFailed, reserveSpend,
-  prisma, Prisma,
+  generationDispatchId, getProfileCentroids, lockOrganizationSpend, markSpendFailed, releaseStaleReservations,
+  reserveSpend, prisma, Prisma,
 } from '@crez/db';
 import {
   providerRegistry, route, StaticQuotaView,
@@ -500,10 +500,12 @@ async function submit(data: GenerationJobPayload) {
   try {
     const result = await provider.submit(request, decision.model);
     providerAccepted = true;
-    await prisma.generationJob.update({
-      where: { id: created.id },
+    // 접수 번호를 잃으면 결과를 영영 회수할 수 없다(제공자에 조회 API가 없다). 돈은 이미 나갔으므로
+    // 이 한 줄만큼은 몇 번이라도 다시 써 본다. 그래도 실패하면 reconciler가 종료 상태로 정리한다.
+    await withRetry(() => prisma.generationJob.update({
+      where: { id: created!.id },
       data: { status: 'SUBMITTED', providerJobId: result.providerJobId },
-    });
+    }), 3, log);
 
     await audit({
       orgId: data.orgId, action: 'PROJECT_GENERATED', projectId: project.id,
@@ -621,8 +623,17 @@ async function poll(
       isMock: provider.code === 'mock', traceId: data.traceId,
     });
   } catch (e) {
-    log.warn({ err: String(e), lastAttempt }, '결과물 수집 실패 — 폴링 복구 대상으로 남긴다');
-    throw e;
+    // 큐 재시도가 남아 있으면 다시 던져 재시도에 맡긴다.
+    if (!lastAttempt) {
+      log.warn({ err: String(e) }, '결과물 수집 실패 — 폴링 재시도에 맡긴다');
+      throw e;
+    }
+    // 재시도를 다 썼는데도 못 가져오면 종료 상태로 떨어뜨린다. 그러지 않으면 구간이 GENERATING에
+    // 영원히 남고 reconciler가 60초마다 새 폴링을 만들며, 화면에는 아무것도 뜨지 않는다.
+    log.error({ err: String(e) }, '결과물 수집을 끝내 실패했다 — 종료 상태로 내린다');
+    await failJob(genJob.id, data.segmentId, data.projectId, data, ErrorCode.GEN_PROVIDER_ERROR,
+      `결과물 수집 실패: ${String(e)}`);
+    return { failed: true, code: ErrorCode.GEN_PROVIDER_ERROR };
   }
   // DB/QC 큐 장애는 유료 결과를 FAILED로 확정하지 않는다. 미완료 상태를 reconciler가 복구한다.
   return finalizeGeneration(genJob.id, data, result);
@@ -838,11 +849,69 @@ async function failJob(
   });
 }
 
+/** 짧게 몇 번 다시 해 본다 — 일시적인 DB 끊김으로 접수 번호를 잃지 않기 위한 최소한의 보호다. */
+async function withRetry<T>(fn: () => Promise<T>, attempts: number, log: ReturnType<typeof childLogger>): Promise<T> {
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      log.warn({ err: String(e), try: i + 1, attempts }, 'DB 기록 재시도');
+      await new Promise((r) => setTimeout(r, 200 * (i + 1)));
+    }
+  }
+  throw lastError;
+}
+
 /**
- * §8 reconciler — 워커 재시작으로 폴링이 유실된 SUBMITTED/RUNNING job을 주기적으로 재투입한다.
+ * §8 reconciler — 유실된 작업을 주기적으로 줍는다.
+ *
+ *  1. 폴링이 끊긴 SUBMITTED/RUNNING job 재투입
+ *  2. 제출 결과를 기록하지 못한 채 멈춘 job을 종료 상태로 내린다 (접수 번호를 잃어 회수 불가)
+ *  3. 너무 오래된 job은 폴링을 무한히 만들지 않고 종료 상태로 내린다
+ *  4. QC 인계 재시도
+ *  5. 큐에 넣지 못한 예약 재전달
+ *  6. 제출로 이어지지 않은 고아 예약 해제 — 없으면 한도가 영구히 잠긴다
  */
 export async function reconcileSubmittedJobs(): Promise<number> {
   const staleAfterMs = Number(process.env.GEN_RECONCILE_STALE_MS ?? 120000);
+  const log = childLogger({ component: 'reconciler' });
+  // 제출 직후 DB 기록에 실패해 QUEUED·접수번호 없음으로 멈춘 작업 — 재시도해도 멱등성 가드에 걸려
+  // '정상 완료'로 끝나므로 아무도 줍지 못한다. 접수 여부를 알 수 없으니 과금은 그대로 두고 종료만 시킨다.
+  const submitStuckMs = Number(process.env.GEN_SUBMIT_STUCK_MS ?? 900000);
+  const stuck = await prisma.generationJob.findMany({
+    where: {
+      status: 'QUEUED', providerJobId: null,
+      startedAt: { lt: new Date(Date.now() - submitStuckMs) },
+    },
+    include: { segment: { include: { project: true } } },
+    take: 50,
+  });
+  for (const j of stuck) {
+    log.error({ generationJobId: j.id, segmentId: j.segmentId },
+      '제출 결과를 기록하지 못한 채 멈춘 작업 — 종료 상태로 내린다(제공자 접수 여부 불명)');
+    await failJob(j.id, j.segmentId, j.segment.projectId, {
+      traceId: (j.params as { traceId?: string }).traceId ?? `reconcile-${j.id}`,
+      orgId: j.segment.project.orgId,
+    }, ErrorCode.GEN_PROVIDER_ERROR,
+    '제출 결과를 기록하지 못했습니다 — 제공자 접수 여부를 확인하세요');
+  }
+
+  // 결과를 끝내 가져오지 못한 채 오래된 작업 — 폴링을 무한히 새로 만들지 않는다.
+  const maxAgeMs = Number(process.env.GEN_MAX_JOB_AGE_MS ?? 6 * 60 * 60 * 1000);
+  const tooOld = await prisma.generationJob.findMany({
+    where: { status: { in: ['SUBMITTED', 'RUNNING'] }, startedAt: { lt: new Date(Date.now() - maxAgeMs) } },
+    include: { segment: { include: { project: true } } },
+    take: 50,
+  });
+  for (const j of tooOld) {
+    log.error({ generationJobId: j.id, ageMs: maxAgeMs }, '오래된 생성 작업 — 폴링을 멈추고 종료 상태로 내린다');
+    await failJob(j.id, j.segmentId, j.segment.projectId, {
+      traceId: (j.params as { traceId?: string }).traceId ?? `reconcile-${j.id}`,
+      orgId: j.segment.project.orgId,
+    }, ErrorCode.GEN_PROVIDER_ERROR, `결과를 ${Math.round(maxAgeMs / 60000)}분 동안 가져오지 못했습니다`);
+  }
   const stale = await prisma.generationJob.findMany({
     where: {
       status: { in: ['SUBMITTED', 'RUNNING'] },
@@ -896,9 +965,29 @@ export async function reconcileSubmittedJobs(): Promise<number> {
       });
       await prisma.spendEntry.update({ where: { id: entry.id }, data: { dispatchedAt: new Date() } });
     } catch (error) {
-      childLogger({ component: 'reconciler' }).warn({ err: String(error), entryId: entry.id }, '생성 큐 인계 재시도 실패');
+      log.warn({ err: String(error), entryId: entry.id }, '생성 큐 인계 재시도 실패');
     }
   }
   if (stale.length > 0) childLogger({ component: 'reconciler' }).info({ count: stale.length }, 'requeued stale polls');
-  return stale.length + pendingQc.length + pendingDispatch.filter((e) => e.dispatch).length;
+  // 제출로 이어지지 않은 고아 예약을 푼다. 예약은 월이 바뀌어도 계속 합산되므로(readSpendLedger),
+  // 청소하지 않으면 큐가 잃어버린 한 건이 그 조직의 한도를 영구히 깎는다.
+  const reservationTtlMs = Number(process.env.GEN_RESERVATION_TTL_MS ?? 6 * 60 * 60 * 1000);
+  let released: Array<{ id: string; orgId: string; segmentId: string; attempt: number; amountCredits: number }> = [];
+  try {
+    released = await prisma.$transaction((tx) =>
+      releaseStaleReservations(tx, new Date(Date.now() - reservationTtlMs)));
+    for (const r of released) {
+      log.warn({ ...r, ttlMs: reservationTtlMs }, '제출되지 않은 고아 예약을 해제했다 — 한도에서 뺀다');
+      await audit({
+        orgId: r.orgId, action: 'PROJECT_GENERATED', projectId: null,
+        payload: { event: 'RESERVATION_RELEASED', segmentId: r.segmentId, attempt: r.attempt, amountCredits: r.amountCredits },
+        traceId: `reconcile-${r.id}`,
+      });
+    }
+  } catch (error) {
+    log.warn({ err: String(error) }, '고아 예약 해제 실패');
+  }
+
+  return stale.length + pendingQc.length + pendingDispatch.filter((e) => e.dispatch).length
+    + stuck.length + tooOld.length + released.length;
 }

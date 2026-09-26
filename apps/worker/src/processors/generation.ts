@@ -869,16 +869,20 @@ async function failJob(
   const terminal: string[] = [ErrorCode.GEN_CONTENT_POLICY, ErrorCode.GEN_NO_CAPABLE_MODEL, ErrorCode.GEN_QUOTA_EXCEEDED];
   // 재시도 여지가 남았으면 PENDING으로 되돌려 다음 생성 요청을 받을 수 있게 한다 (§5.1)
   const exhausted = (segment?.attemptCount ?? 0) >= MAX_GENERATION_ATTEMPT || terminal.includes(code);
-  // 자동 재제출이 끝난 구간은 이미 GENERATING·attemptCount+1로 바뀌어 있다 — 덮어쓰지 않는다.
-  const segmentStatus = retry?.retrying ? 'GENERATING' : exhausted ? 'FAILED' : 'PENDING';
-  if (!retry?.retrying) {
+  // 재제출이 걸려 있으면 구간은 GENERATING이고 attemptCount도 이미 올라가 있다 — 덮어쓰지 않는다.
+  // ALREADY(중복 폴링이 같은 거부를 또 보고한 경우)도 마찬가지다. 여기서 FAILED로 덮으면
+  // 방금 큐에 넣은 재제출이 `segment.status !== 'GENERATING'`에 걸려 조용히 건너뛰어진다 — 실측으로 당했다.
+  const retryInFlight = retry?.retrying === true || retry?.reason === 'ALREADY';
+  const segmentStatus = retryInFlight ? 'GENERATING' : exhausted ? 'FAILED' : 'PENDING';
+  if (!retryInFlight) {
     await prisma.segment.update({ where: { id: segmentId }, data: { status: segmentStatus } });
   }
 
   // 재시도 사유·한도를 사람이 읽을 수 있게 붙인다 — 화면에는 이 detail만 보인다.
   const shown = retry
-    ? retry.retrying
-      ? `${String(detail)} — 자동 재시도 ${retry.rejections}/${policyRetryLimit()} (시도 ${retry.attempt})`
+    ? retryInFlight
+      ? `${String(detail)} — 자동 재시도 ${retry.rejections}/${policyRetryLimit()}`
+        + (retry.attempt ? ` (시도 ${retry.attempt})` : '')
       : `${String(detail)}${retry.detail ? ` — ${retry.detail}` : ''}`
     : String(detail);
 
@@ -886,7 +890,8 @@ async function failJob(
     type: 'ERROR', projectId, segmentId,
     payload: {
       code, detail: shown, segmentStatus,
-      ...(retry ? { policyRetry: { retrying: retry.retrying, rejections: retry.rejections, attempt: retry.attempt ?? null, reason: retry.reason ?? null } } : {}),
+      // 화면은 retrying으로 색을 고른다 — 다른 폴링이 이미 재제출했어도 '진행 중'이 맞다
+      ...(retry ? { policyRetry: { retrying: retryInFlight, rejections: retry.rejections, attempt: retry.attempt ?? null, reason: retry.reason ?? null } } : {}),
     },
     traceId: data.traceId,
   });

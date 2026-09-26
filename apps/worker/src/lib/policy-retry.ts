@@ -130,6 +130,11 @@ export async function retryAfterContentPolicy(args: {
     // 한도 초과가 아닌 PRJ_INVALID_STATE는 예산 가드(requireBudget)가 막은 것이다.
     const reason: PolicyRetryReason = tagged
       ?? (e instanceof CrezError && e.code === ErrorCode.PRJ_INVALID_STATE ? 'BUDGET' : 'ERROR');
+    if (reason === 'ALREADY') {
+      // 실패가 아니다 — 다른 폴링이 이미 재제출했으니 이 경로는 아무것도 하지 않는 게 맞다
+      log.info({ failedAttempt }, '같은 정책 거부를 중복 폴링이 또 보고했다 — 재제출은 이미 걸려 있다');
+      return { retrying: false, rejections, reason };
+    }
     log.error({ err: String(e), reason }, '정책 거부 자동 재시도를 하지 못했다 — 구간을 실패로 확정한다');
     return {
       retrying: false, rejections, reason,

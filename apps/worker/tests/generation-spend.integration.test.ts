@@ -475,6 +475,22 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     });
     expect(again).toMatchObject({ retrying: false, reason: 'ALREADY' });
     expect(await prisma.spendEntry.count({ where: { segmentId: p.segment.id } })).toBe(2);
+
+    // 그리고 그 중복 보고가 구간을 FAILED로 덮으면 안 된다 — 덮으면 방금 큐에 넣은 재제출이
+    // segment.status !== 'GENERATING'에 걸려 조용히 건너뛰어지고, 예약만 고아로 남는다.
+    const duplicate = await prisma.generationJob.create({ data: {
+      segmentId: p.segment.id, attempt: 2, modelId: fx.model.id, routingTrace: {}, params: { traceId: 'this-run' },
+      status: 'RUNNING', providerJobId: job.providerJobId, startedAt: new Date(),
+    } }).catch(() => null);
+    if (!duplicate) {
+      // 같은 (segmentId, attempt)는 유일하다 — 중복 폴링은 같은 job 행을 다시 본다
+      await prisma.generationJob.update({ where: { id: job.id }, data: { status: 'RUNNING' } });
+    }
+    await generationProcessor({ name: JOB_NAME.GENERATION_POLL, data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, traceId: 'this-run',
+      generationJobId: job.id, providerJobId: job.providerJobId!, pollCount: 2,
+    } } as never);
+    expect((await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } })).status).toBe('GENERATING');
   });
 
   it('제공자 접수 여부가 불명확한 실패는 추정액을 남긴다', async () => {

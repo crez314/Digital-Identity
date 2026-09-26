@@ -193,6 +193,10 @@ export default function ProjectDetail() {
   const estimate = useQuery({
     queryKey: generationEstimateKey(id, project.data?.config, segments.data),
     queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
+    // 구간 상태가 바뀔 때마다 키가 바뀐다. 이전 값을 들고 있지 않으면 생성이 도는 동안
+    // (구간마다 5초 간격 진행 이벤트) 견적이 계속 비어 버튼이 사실상 항상 꺼진다.
+    // 상한은 제출 직전에 다시 받아 오므로(generate) 낡은 값이 그대로 나가지는 않는다.
+    placeholderData: (prev: CostEstimate | undefined) => prev,
     enabled: Boolean(project.data && segments.data),
   });
   // 이번 실행으로 큐에 넣은 구간 — 알림이 "무엇이 몇 개 도는지"를 이 기준으로 센다
@@ -201,9 +205,17 @@ export default function ProjectDetail() {
   const [runDismissed, setRunDismissed] = useState(false);
   const generate = useMutation({
     // 화면에 보여 준 견적을 그대로 상한으로 올려 보낸다 — 본 것과 나가는 것이 같아야 한다
-    mutationFn: () => post<{ submitted: Array<{ segmentId: string }>; traceId: string }>(
-      `/projects/${id}/generate`, { maxCost: estimate.data?.max },
-    ),
+    mutationFn: async () => {
+      // 화면에 남은 견적은 직전 상태의 값일 수 있다. 상한은 지금 상태로 다시 받아 보낸다 —
+      // 본 것과 나가는 것이 같아야 상한이 제 역할을 한다(§12.1).
+      const fresh = await qc.fetchQuery({
+        queryKey: generationEstimateKey(id, project.data?.config, segments.data),
+        queryFn: () => post<CostEstimate>(`/projects/${id}/generate/estimate`, {}),
+      });
+      return post<{ submitted: Array<{ segmentId: string }>; traceId: string }>(
+        `/projects/${id}/generate`, { maxCost: fresh.max },
+      );
+    },
     onError: () => qc.invalidateQueries({ queryKey: ['generate-estimate', id] }),
     onSuccess: (res) => {
       setRun({ ids: res.submitted.map((x) => x.segmentId), traceId: res.traceId });
@@ -257,12 +269,11 @@ export default function ProjectDetail() {
     ? '생성 요청을 보내는 중입니다'
     : status === 'DRAFT'
     ? '생성 준비(캐스팅·구간)를 먼저 완료하세요'
-    : estimate.isFetching
-    ? '예상 비용을 계산하는 중입니다'
     : estimate.isError
     ? `예상 비용을 계산하지 못했습니다 — ${estimate.error instanceof CrezApiError ? estimate.error.body.message : '설정을 확인하세요'}`
+    // 한 번이라도 받은 뒤에는 갱신 중이어도 막지 않는다 — 상한은 제출 직전에 다시 받는다
     : !estimate.data
-    ? '예상 비용을 아직 받지 못했습니다'
+    ? '예상 비용을 계산하는 중입니다'
     : exhausted.length > 0 && generatable === 0
     ? `구간 ${exhausted.length}개가 시도 한도(${MAX_ATTEMPT}회)를 다 썼습니다 — 초기화하면 다시 생성할 수 있습니다`
     : generatable === 0 && (segments.data?.length ?? 0) > 0

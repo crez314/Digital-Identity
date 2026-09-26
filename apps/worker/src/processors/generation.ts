@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Job } from 'bullmq';
 import {
-  generationDispatchId, getProfileCentroids, lockOrganizationSpend, markSpendFailed, releaseStaleReservations,
-  reserveSpend, prisma, Prisma,
+  findStaleReservations, generationDispatchId, getProfileCentroids, lockOrganizationSpend, markSpendFailed,
+  releaseReservations, reserveSpend, prisma, Prisma,
 } from '@crez/db';
 import {
   providerRegistry, route, StaticQuotaView,
@@ -531,7 +531,11 @@ async function submit(data: GenerationJobPayload) {
         traceId: data.traceId, orgId: data.orgId, projectId: project.id, segmentId: segment.id,
         generationJobId: created.id, providerJobId: result.providerJobId, pollCount: 0,
       },
-      { delay: 2000 },
+      {
+        attempts: QUEUE_POLICY[QUEUE.GENERATION].attempts,
+        backoff: { type: 'exponential', delay: QUEUE_POLICY[QUEUE.GENERATION].backoffMs },
+        delay: 2000,
+      },
     );
 
     log.info({ model: decision.model.code, providerJobId: result.providerJobId }, 'generation submitted');
@@ -551,8 +555,20 @@ async function submit(data: GenerationJobPayload) {
 /** 제출 준비가 큐의 마지막 재시도에서도 실패하면 미제출 예약을 해제한다. */
 export function isLastAttempt(job: { attemptsMade?: number; opts?: { attempts?: number } }): boolean {
   const made = job.attemptsMade ?? 0;
-  const allowed = job.opts?.attempts ?? 1;
+  // BullMQ는 옵션을 주지 않으면 attempts를 0으로 박는다(bullmq/job.js). `?? 1`로는 그 0을 거르지 못해
+  // "항상 마지막 시도"가 되고, 일시적 실패 한 번에 이미 과금된 결과를 버리게 된다.
+  const configured = job.opts?.attempts;
+  const allowed = typeof configured === 'number' && configured > 0
+    ? configured
+    : QUEUE_POLICY[QUEUE.GENERATION].attempts;
   return made + 1 >= allowed;
+}
+
+/** 환경변수로 받은 밀리초. 빈 문자열·비숫자·음수는 기본값으로 돌린다 — 0이면 모든 항목이 즉시 대상이 된다. */
+export function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const parsed = raw === undefined || raw === '' ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 /** Prisma 유일 제약 위반 판별. */
@@ -593,7 +609,7 @@ async function poll(
     });
 
     const pollCount = (data.pollCount ?? 0) + 1;
-    const maxPolls = Number(process.env.GEN_MAX_POLLS ?? 720);
+    const maxPolls = envMs('GEN_MAX_POLLS', 720);
     if (pollCount > maxPolls) {
       await failJob(genJob.id, data.segmentId, data.projectId, data, ErrorCode.GEN_PROVIDER_ERROR, 'poll timeout');
       throw new CrezError(ErrorCode.GEN_PROVIDER_ERROR, '생성 폴링 시간 초과', { pollCount }, 504);
@@ -601,7 +617,11 @@ async function poll(
     await queues.generation.add(
       JOB_NAME.GENERATION_POLL,
       { ...data, pollCount },
-      { delay: state.nextPollMs ?? 5000 },
+      {
+        attempts: QUEUE_POLICY[QUEUE.GENERATION].attempts,
+        backoff: { type: 'exponential', delay: QUEUE_POLICY[QUEUE.GENERATION].backoffMs },
+        delay: state.nextPollMs ?? 5000,
+      },
     );
     return { state: 'RUNNING', progress: state.progress };
   }
@@ -875,11 +895,11 @@ async function withRetry<T>(fn: () => Promise<T>, attempts: number, log: ReturnT
  *  6. 제출로 이어지지 않은 고아 예약 해제 — 없으면 한도가 영구히 잠긴다
  */
 export async function reconcileSubmittedJobs(): Promise<number> {
-  const staleAfterMs = Number(process.env.GEN_RECONCILE_STALE_MS ?? 120000);
+  const staleAfterMs = envMs('GEN_RECONCILE_STALE_MS', 120000);
   const log = childLogger({ component: 'reconciler' });
   // 제출 직후 DB 기록에 실패해 QUEUED·접수번호 없음으로 멈춘 작업 — 재시도해도 멱등성 가드에 걸려
   // '정상 완료'로 끝나므로 아무도 줍지 못한다. 접수 여부를 알 수 없으니 과금은 그대로 두고 종료만 시킨다.
-  const submitStuckMs = Number(process.env.GEN_SUBMIT_STUCK_MS ?? 900000);
+  const submitStuckMs = envMs('GEN_SUBMIT_STUCK_MS', 900000);
   const stuck = await prisma.generationJob.findMany({
     where: {
       status: 'QUEUED', providerJobId: null,
@@ -889,6 +909,7 @@ export async function reconcileSubmittedJobs(): Promise<number> {
     take: 50,
   });
   for (const j of stuck) {
+    try {
     log.error({ generationJobId: j.id, segmentId: j.segmentId },
       '제출 결과를 기록하지 못한 채 멈춘 작업 — 종료 상태로 내린다(제공자 접수 여부 불명)');
     await failJob(j.id, j.segmentId, j.segment.projectId, {
@@ -896,21 +917,29 @@ export async function reconcileSubmittedJobs(): Promise<number> {
       orgId: j.segment.project.orgId,
     }, ErrorCode.GEN_PROVIDER_ERROR,
     '제출 결과를 기록하지 못했습니다 — 제공자 접수 여부를 확인하세요');
+    } catch (error) {
+      // 한 건이 실패해도 뒤 단계(고아 예약 해제 등)까지 멈추면 안 된다
+      log.warn({ err: String(error), generationJobId: j.id }, '멈춘 작업 정리 실패');
+    }
   }
 
   // 결과를 끝내 가져오지 못한 채 오래된 작업 — 폴링을 무한히 새로 만들지 않는다.
-  const maxAgeMs = Number(process.env.GEN_MAX_JOB_AGE_MS ?? 6 * 60 * 60 * 1000);
+  const maxAgeMs = envMs('GEN_MAX_JOB_AGE_MS', 6 * 60 * 60 * 1000);
   const tooOld = await prisma.generationJob.findMany({
     where: { status: { in: ['SUBMITTED', 'RUNNING'] }, startedAt: { lt: new Date(Date.now() - maxAgeMs) } },
     include: { segment: { include: { project: true } } },
     take: 50,
   });
   for (const j of tooOld) {
+    try {
     log.error({ generationJobId: j.id, ageMs: maxAgeMs }, '오래된 생성 작업 — 폴링을 멈추고 종료 상태로 내린다');
     await failJob(j.id, j.segmentId, j.segment.projectId, {
       traceId: (j.params as { traceId?: string }).traceId ?? `reconcile-${j.id}`,
       orgId: j.segment.project.orgId,
     }, ErrorCode.GEN_PROVIDER_ERROR, `결과를 ${Math.round(maxAgeMs / 60000)}분 동안 가져오지 못했습니다`);
+    } catch (error) {
+      log.warn({ err: String(error), generationJobId: j.id }, '오래된 작업 정리 실패');
+    }
   }
   const stale = await prisma.generationJob.findMany({
     where: {
@@ -931,7 +960,11 @@ export async function reconcileSubmittedJobs(): Promise<number> {
         segmentId: j.segmentId, generationJobId: j.id,
         providerJobId: j.providerJobId as string, pollCount: 0,
       },
-      { delay: 1000, jobId: `reconcile-${j.id}-${Date.now()}` },
+      {
+        attempts: QUEUE_POLICY[QUEUE.GENERATION].attempts,
+        backoff: { type: 'exponential', delay: QUEUE_POLICY[QUEUE.GENERATION].backoffMs },
+        delay: 1000, jobId: `reconcile-${j.id}-${Date.now()}`,
+      },
     );
   }
   const pendingQc = await prisma.generationOutput.findMany({
@@ -971,23 +1004,68 @@ export async function reconcileSubmittedJobs(): Promise<number> {
   if (stale.length > 0) childLogger({ component: 'reconciler' }).info({ count: stale.length }, 'requeued stale polls');
   // 제출로 이어지지 않은 고아 예약을 푼다. 예약은 월이 바뀌어도 계속 합산되므로(readSpendLedger),
   // 청소하지 않으면 큐가 잃어버린 한 건이 그 조직의 한도를 영구히 깎는다.
-  const reservationTtlMs = Number(process.env.GEN_RESERVATION_TTL_MS ?? 6 * 60 * 60 * 1000);
-  let released: Array<{ id: string; orgId: string; segmentId: string; attempt: number; amountCredits: number }> = [];
+  const reservationTtlMs = envMs('GEN_RESERVATION_TTL_MS', 6 * 60 * 60 * 1000);
+  let releasedIds: string[] = [];
   try {
-    released = await prisma.$transaction((tx) =>
-      releaseStaleReservations(tx, new Date(Date.now() - reservationTtlMs)));
-    for (const r of released) {
-      log.warn({ ...r, ttlMs: reservationTtlMs }, '제출되지 않은 고아 예약을 해제했다 — 한도에서 뺀다');
-      await audit({
-        orgId: r.orgId, action: 'PROJECT_GENERATED', projectId: null,
-        payload: { event: 'RESERVATION_RELEASED', segmentId: r.segmentId, attempt: r.attempt, amountCredits: r.amountCredits },
-        traceId: `reconcile-${r.id}`,
-      });
+    const candidates = await findStaleReservations(prisma, new Date(Date.now() - reservationTtlMs));
+    // 큐에서 아직 실행되지 않은 제출 작업은 generationJob 행이 없다 — DB만 보면 "고아"로 오인해
+    // 살아 있는 실행의 예약을 풀어 버린다. 큐에 그 작업이 남아 있으면 건드리지 않는다.
+    const orphans = [];
+    for (const c of candidates) {
+      const queued = typeof queues.generation.getJob === 'function'
+        ? await queues.generation.getJob(generationDispatchId(c.segmentId, c.attempt)).catch(() => null)
+        : null;
+      const state = queued ? await queued.getState().catch(() => null) : null;
+      if (queued && (state === null || !['completed', 'failed'].includes(state))) {
+        // 상태를 읽지 못했으면 살아 있다고 본다 — 해제는 되돌릴 수 없다.
+        log.info({ segmentId: c.segmentId, attempt: c.attempt, state }, '큐에 남아 있는 예약은 해제하지 않는다');
+        continue;
+      }
+      orphans.push(c);
+    }
+    if (orphans.length > 0) {
+      const byOrg = new Map<string, typeof orphans>();
+      for (const o of orphans) byOrg.set(o.orgId, [...(byOrg.get(o.orgId) ?? []), o]);
+      for (const [orgId, list] of byOrg) {
+        const ids = await prisma.$transaction(async (tx) => {
+          await lockOrganizationSpend(tx, orgId);
+          return releaseReservations(tx, list.map((o) => o.id));
+        });
+        releasedIds = [...releasedIds, ...ids];
+        for (const o of list.filter((x) => ids.includes(x.id))) {
+          // 돈만 풀고 구간을 GENERATING에 두면 잠김이 '한도'에서 '프로젝트'로 옮겨갈 뿐이다.
+          // 제출된 적이 없으므로 시도 횟수도 되돌리고 다시 생성할 수 있게 둔다.
+          const segment = await prisma.segment.findUnique({ where: { id: o.segmentId } });
+          if (segment?.status === 'GENERATING') {
+            await prisma.segment.update({
+              where: { id: o.segmentId },
+              data: { status: 'PENDING', attemptCount: Math.max(0, segment.attemptCount - 1) },
+            });
+            await emit({
+              type: 'ERROR', projectId: o.projectId, segmentId: o.segmentId,
+              payload: {
+                code: ErrorCode.GEN_PROVIDER_ERROR, segmentStatus: 'PENDING',
+                message: '제출되지 않은 채 남아 있던 예약을 정리했습니다 — 다시 실행할 수 있습니다',
+              },
+              traceId: `reconcile-${o.id}`,
+            });
+          }
+          log.warn({ ...o, ttlMs: reservationTtlMs }, '제출되지 않은 고아 예약을 해제했다 — 한도에서 뺀다');
+          await audit({
+            orgId: o.orgId, action: 'PROJECT_GENERATED', projectId: o.projectId,
+            payload: {
+              event: 'RESERVATION_RELEASED', segmentId: o.segmentId, attempt: o.attempt,
+              amountCredits: o.amountCredits,
+            },
+            traceId: `reconcile-${o.id}`,
+          });
+        }
+      }
     }
   } catch (error) {
     log.warn({ err: String(error) }, '고아 예약 해제 실패');
   }
 
   return stale.length + pendingQc.length + pendingDispatch.filter((e) => e.dispatch).length
-    + stuck.length + tooOld.length + released.length;
+    + stuck.length + tooOld.length + releasedIds.length;
 }

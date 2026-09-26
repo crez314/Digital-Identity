@@ -17,9 +17,11 @@ import { generationProcessor, reconcileSubmittedJobs } from '../src/processors/g
 import { finalizeGeneration } from '../src/lib/generation-finalize';
 
 const f = vi.hoisted(() => ({
-  qcAdd: vi.fn(), generationAdd: vi.fn(), emit: vi.fn(), audit: vi.fn(),
+  qcAdd: vi.fn(), generationAdd: vi.fn(), generationGetJob: vi.fn(), emit: vi.fn(), audit: vi.fn(),
 }));
-vi.mock('../src/lib/queues', () => ({ queues: { qc: { add: f.qcAdd }, generation: { add: f.generationAdd } } }));
+vi.mock('../src/lib/queues', () => ({
+  queues: { qc: { add: f.qcAdd }, generation: { add: f.generationAdd, getJob: f.generationGetJob } },
+}));
 vi.mock('../src/lib/events', () => ({ emit: f.emit }));
 vi.mock('../src/lib/audit', () => ({ audit: f.audit }));
 
@@ -86,6 +88,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     queue.add.mockReset().mockResolvedValue('queue-id');
     f.qcAdd.mockReset().mockImplementation((...args) => qcQueue.add(...args as Parameters<Queue['add']>));
     f.generationAdd.mockReset().mockResolvedValue({ id: 'queue-id' });
+    // 기본은 "큐에 남은 작업 없음" — 살아있음을 보려는 테스트에서만 채운다
+    f.generationGetJob.mockReset().mockResolvedValue(null);
     f.emit.mockReset().mockResolvedValue(undefined);
   });
   afterAll(async () => {
@@ -266,19 +270,42 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     await expect(generation.generate(fx.user, p.project.id, {}, 'unlocked')).resolves.toBeTruthy();
   });
 
-  it('아직 돌고 있는 작업의 예약은 오래돼도 해제하지 않는다', async () => {
+  it('큐에 아직 남아 있는 제출 작업의 예약은 오래돼도 해제하지 않는다', async () => {
+    // 큐에서 실행되기 전의 작업은 generationJob 행이 없다. DB만 보면 '고아'로 오인해
+    // 살아 있는 실행의 예약을 풀어 버리고, 이어지는 제출은 RELEASED로 조용히 끝난다.
     const fx = await fixture(6000); const p = await fx.project();
-    await prisma.generationJob.create({ data: {
-      segmentId: p.segment.id, attempt: 9, modelId: fx.model.id, routingTrace: {}, params: {},
-      status: 'RUNNING', providerJobId: `provider-${randomUUID()}`, startedAt: new Date(),
-    } });
     await prisma.spendEntry.create({ data: {
       orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 9,
       amountCredits: 6, status: 'RESERVED', createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
     } });
+    f.generationGetJob.mockImplementation((jobId: string) =>
+      Promise.resolve(jobId === `submit-${p.segment.id}-9`
+        ? { getState: () => Promise.resolve('delayed') }
+        : null));
+
     await reconcileSubmittedJobs();
+
     const entry = await prisma.spendEntry.findFirstOrThrow({ where: { segmentId: p.segment.id, attempt: 9 } });
     expect(entry.status).toBe('RESERVED');
+    expect(f.generationGetJob).toHaveBeenCalledWith(`submit-${p.segment.id}-9`);
+  });
+
+  it('고아 예약을 풀 때 구간도 함께 되돌린다 — 잠김이 돈에서 프로젝트로 옮겨가면 안 된다', async () => {
+    const fx = await fixture(6000); const p = await fx.project();
+    await prisma.segment.update({
+      where: { id: p.segment.id }, data: { status: 'GENERATING', attemptCount: 1 },
+    });
+    await prisma.spendEntry.create({ data: {
+      orgId: fx.org.id, projectId: p.project.id, segmentId: p.segment.id, attempt: 1,
+      amountCredits: 6, status: 'RESERVED', createdAt: new Date(Date.now() - 7 * 60 * 60 * 1000),
+    } });
+
+    await reconcileSubmittedJobs();
+
+    const segment = await prisma.segment.findUniqueOrThrow({ where: { id: p.segment.id } });
+    expect(segment.status).toBe('PENDING');   // 다시 실행할 수 있다
+    expect(segment.attemptCount).toBe(0);     // 제출된 적이 없으므로 시도도 되돌린다
+    expect((await readSpendLedger(prisma, fx.org.id)).net).toBe(0);
   });
 
   it('제출 결과를 기록하지 못해 멈춘 작업을 종료 상태로 내린다', async () => {
@@ -311,9 +338,15 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)('실제 DB/큐: 지출 예약과
     vi.spyOn(providerRegistry, 'resolve').mockReturnValue(provider as never);
     const pollJob = { name: JOB_NAME.GENERATION_POLL, data: {
       ...data, generationJobId: job.id, providerJobId: job.providerJobId, pollCount: 0,
-    }, attemptsMade: 4, opts: { attempts: 5 } };
+    // 실제 큐가 만드는 형태: attempts를 지정하지 않으면 BullMQ가 0을 박는다.
+    // 첫 실패(재시도 남음)에는 결과를 버리지 않고 큐 재시도에 맡겨야 한다.
+    }, attemptsMade: 0, opts: {} };
+    await expect(generationProcessor(pollJob as never)).rejects.toThrow('storage unreachable');
+    expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe('RUNNING');
 
-    const res = await generationProcessor(pollJob as never);
+    // 마지막 시도(기본 3회)에서야 종료 상태로 내린다
+    const lastTry = { ...pollJob, attemptsMade: 2 };
+    const res = await generationProcessor(lastTry as never);
 
     expect(res).toMatchObject({ failed: true });
     const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: job.id } });

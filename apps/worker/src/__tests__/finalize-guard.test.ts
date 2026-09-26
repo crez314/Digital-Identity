@@ -18,9 +18,16 @@ describe('결과물 수집 실패 처리', () => {
     expect(isLastAttempt({ attemptsMade: 2, opts: { attempts: 3 } })).toBe(true);
   });
 
-  it('재시도 설정이 없으면 한 번이 곧 마지막이다', () => {
-    expect(isLastAttempt({})).toBe(true);
-    expect(isLastAttempt({ attemptsMade: 0, opts: {} })).toBe(true);
+  /**
+   * BullMQ는 옵션을 주지 않으면 attempts를 **0**으로 박는다. 예전 구현은 `opts.attempts ?? 1`이라
+   * 그 0을 거르지 못해 모든 폴링 작업이 "항상 마지막 시도"가 됐고, 스토리지가 한 번 깜빡이면
+   * 이미 과금된 결과를 그대로 버렸다. 설정이 없으면 큐 정책(generation: 3회)을 따른다.
+   */
+  it('재시도 설정이 없으면 큐 정책을 따른다 — 첫 실패에 결과를 버리지 않는다', () => {
+    expect(isLastAttempt({})).toBe(false);
+    expect(isLastAttempt({ attemptsMade: 0, opts: {} })).toBe(false);
+    expect(isLastAttempt({ attemptsMade: 0, opts: { attempts: 0 } })).toBe(false);
+    expect(isLastAttempt({ attemptsMade: 2, opts: {} })).toBe(true);
   });
 });
 

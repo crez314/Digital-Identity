@@ -74,26 +74,35 @@ export async function readSpendCredits(db: SpendDb, orgId: string, now = new Dat
   return (await readSpendLedger(db, orgId, now, excludeIds)).net;
 }
 
+export interface StaleReservation {
+  id: string;
+  orgId: string;
+  projectId: string;
+  segmentId: string;
+  attempt: number;
+  amountCredits: number;
+}
+
 /**
- * 제출로 이어지지 않은 채 오래 남은 예약을 푼다.
+ * 제출로 이어지지 않은 채 오래 남은 예약 후보를 찾는다.
  *
  * 예약은 "제출 전까지 유지"가 원칙이라 월이 바뀌어도 계속 합산된다(readSpendLedger). 그래서 큐가
- * 작업을 잃어버리거나 워커가 죽어 생긴 고아 예약은 **영구히** 한도를 깎았고, 되돌릴 수단이 없었다.
- * 생성은 몇 분이면 끝나므로, 살아 있는 job이 없는 채로 이 시간을 넘긴 예약은 고아로 본다.
+ * 작업을 잃어버리거나 워커가 죽어 생긴 고아 예약은 영구히 한도를 깎았고, 되돌릴 수단이 없었다.
  *
+ * 여기서는 DB만 본다. generationJob 행이 있으면 이미 제출 단계로 넘어간 것이라 대상이 아니지만,
+ * **큐에서 아직 실행되지 않은 작업은 job 행이 없다** — 그 판단은 큐를 아는 호출자가 한다(worker).
  * 제공자에 이미 나간 예약(SUBMITTED)은 손대지 않는다 — 돈이 나갔을 수 있다.
  */
-export async function releaseStaleReservations(
+export async function findStaleReservations(
   db: Pick<Prisma.TransactionClient, 'spendEntry' | 'generationJob'>,
   olderThan: Date,
   limit = 200,
-): Promise<Array<{ id: string; orgId: string; segmentId: string; attempt: number; amountCredits: number }>> {
+): Promise<StaleReservation[]> {
   const candidates = await db.spendEntry.findMany({
     where: { status: 'RESERVED', createdAt: { lt: olderThan } },
     orderBy: { createdAt: 'asc' }, take: limit,
   });
   if (candidates.length === 0) return [];
-  // 아직 돌고 있는 작업의 예약은 건드리지 않는다.
   const live = await db.generationJob.findMany({
     where: {
       status: { in: ['QUEUED', 'SUBMITTED', 'RUNNING'] },
@@ -102,15 +111,27 @@ export async function releaseStaleReservations(
     select: { segmentId: true, attempt: true },
   });
   const liveKey = new Set(live.map((j) => `${j.segmentId}:${j.attempt}`));
-  const orphans = candidates.filter((c) => !liveKey.has(`${c.segmentId}:${c.attempt}`));
-  if (orphans.length === 0) return [];
+  return candidates
+    .filter((c) => !liveKey.has(`${c.segmentId}:${c.attempt}`))
+    .map((c) => ({
+      id: c.id, orgId: c.orgId, projectId: c.projectId,
+      segmentId: c.segmentId, attempt: c.attempt, amountCredits: Number(c.amountCredits),
+    }));
+}
+
+/** 예약을 해제한다. 그 사이 제출된 건은 상태 가드에 걸려 빠지므로, 실제로 해제된 id만 돌려준다. */
+export async function releaseReservations(
+  db: Pick<Prisma.TransactionClient, 'spendEntry'>, ids: string[],
+): Promise<string[]> {
+  if (ids.length === 0) return [];
   await db.spendEntry.updateMany({
-    where: { id: { in: orphans.map((o) => o.id) }, status: 'RESERVED' },
+    where: { id: { in: ids }, status: 'RESERVED' },
     data: { status: 'RELEASED' },
   });
-  return orphans.map((o) => ({
-    id: o.id, orgId: o.orgId, segmentId: o.segmentId, attempt: o.attempt, amountCredits: Number(o.amountCredits),
-  }));
+  const released = await db.spendEntry.findMany({
+    where: { id: { in: ids }, status: 'RELEASED' }, select: { id: true },
+  });
+  return released.map((r) => r.id);
 }
 
 /**
